@@ -375,6 +375,7 @@ if (XQC_ENABLE_TESTING)
     ### test client/server ###
     add_executable(test_server tests/test_server.c ${GETOPT_SOURCES})
     add_executable(test_client tests/test_client.c ${GETOPT_SOURCES})
+    add_executable(xquic_bench tests/xquic_bench.c ${GETOPT_SOURCES})
 
     ### hq demo client/server ###
     set(
@@ -433,6 +434,7 @@ if (XQC_ENABLE_TESTING)
     else()
         target_link_libraries(test_server xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm)
         target_link_libraries(test_client xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm)
+        target_link_libraries(xquic_bench xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm)
         target_link_libraries(demo_server xquic -levent -lm)
         target_link_libraries(demo_client xquic -levent -lm)
     endif()
