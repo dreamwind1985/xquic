@@ -188,5 +188,14 @@ int client_fill_default_headers(xqc_http_header_t *header_array,
     int max_header_num, int *header_cnt);
 int client_read_http_headers_from_file(xqc_http_header_t *header_array, int max_header_num,
     char * file_path, char *header_buffer, int header_buf_size);
+void client_engine_callback(int fd, short what, void *arg);
+int client_check_close_user_conn(user_conn_t * user_conn);
+ 
+void client_timeout_callback(int fd, short what, void *arg);
+void client_socket_event_callback(int fd, short what, void *arg);
+int client_create_socket(int type, 
+    const struct sockaddr *saddr, socklen_t saddr_len, char *interface);
+void client_init_addr(user_conn_t *user_conn,
+    const char *server_addr, int server_port);
 
 #endif  /* __CLIENT_COMMON_H__ */

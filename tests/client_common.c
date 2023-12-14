@@ -20,7 +20,7 @@ char    g_server_addr[64];
 int     g_server_port;
 int     g_use_1rtt = 0;
 int     g_no_crypto_flag = 0;
-int     g_conn_num = 100;
+int     g_conn_num = 1;
 int     g_max_conn_num = MAX_CONN_NUM;
 int     g_stream_num_per_conn = 10;
 int     g_qpack_header_num = 10;
@@ -233,7 +233,7 @@ client_keylog_cb(const xqc_cid_t *scid, const char *line, void *user_data)
 
 
 void 
-xqc_convert_addr_text_to_sockaddr(int type,
+convert_addr_text_to_sockaddr(int type,
     const char *addr_text, unsigned int port,
     struct sockaddr **saddr, socklen_t *saddr_len)
 {
@@ -269,7 +269,7 @@ client_write_socket(const unsigned char *buf, size_t size,
         errno = 0;
         res = sendto(fd, buf, size, 0, peer_addr, peer_addrlen);
         if (res < 0) {
-            printf("xqc_client_write_socket err %zd %s\n", res, strerror(errno));
+            printf("xquic client_write_socket err %zd %s\n", res, strerror(errno));
             if (errno == EAGAIN) {
                 res = XQC_SOCKET_EAGAIN; 
             }
@@ -281,7 +281,7 @@ client_write_socket(const unsigned char *buf, size_t size,
     return res;
 }
 
-xqc_int_t 
+int 
 client_conn_closing_notify(xqc_connection_t *conn,
     const xqc_cid_t *cid, xqc_int_t err_code, void *conn_user_data)
 {
@@ -376,7 +376,7 @@ client_read_http_headers_from_file(xqc_http_header_t *header_array, int max_head
 
 int
 client_fill_default_headers(xqc_http_header_t *header_array,
-        int max_header_num, int *header_cnt)
+    int max_header_num, int *header_cnt)
 {
     if (*header_cnt + 4 > max_header_num) {
         return -1;
@@ -409,6 +409,222 @@ client_fill_default_headers(xqc_http_header_t *header_array,
     header_array[(*header_cnt)].flags = 0;
     (*header_cnt)++;
     return 0;
+}
+
+
+/* 定时调用main_logic */
+void
+client_engine_callback(int fd, short what, void *arg)
+{
+    client_ctx_t *ctx = (client_ctx_t *) arg;
+
+    xqc_engine_main_logic(ctx->engine);
+}
+
+
+int
+client_check_close_user_conn(user_conn_t * user_conn)
+{
+    if(user_conn->cur_stream_num > 0 || user_conn->total_stream_num < g_stream_num_per_conn ){
+        return 0;
+    }
+
+    if(user_conn->cur_stream_num < 0) {
+        printf("error cur_stream_num little than 0\n");
+        return -1;
+    }
+
+    client_ctx_t *ctx = user_conn->ctx;
+    int rc = xqc_conn_close(ctx->engine, &user_conn->cid);
+    if(rc){
+        printf("xqc_conn_close error\n");
+        return 0;
+    }
+    return 0;
+}
+
+void
+client_init_addr(user_conn_t *user_conn,
+    const char *server_addr, int server_port)
+{
+    int ip_type = AF_INET; /* 暂时没有支持ipv6 */
+    convert_addr_text_to_sockaddr(ip_type, 
+                                      server_addr, server_port,
+                                      &user_conn->peer_addr, 
+                                      &user_conn->peer_addrlen);
+
+    if (ip_type == AF_INET6) {
+        user_conn->local_addr = (struct sockaddr *)calloc(1, sizeof(struct sockaddr_in6));
+        memset(user_conn->local_addr, 0, sizeof(struct sockaddr_in6));
+        user_conn->local_addrlen = sizeof(struct sockaddr_in6);
+
+    } else {
+        user_conn->local_addr = (struct sockaddr *)calloc(1, sizeof(struct sockaddr_in));
+        memset(user_conn->local_addr, 0, sizeof(struct sockaddr_in));
+        user_conn->local_addrlen = sizeof(struct sockaddr_in);
+    }
+}
+
+
+
+int 
+client_create_socket(int type, 
+    const struct sockaddr *saddr, socklen_t saddr_len, char *interface)
+{
+    int size;
+    int fd = -1;
+
+    /* create fd & set socket option */
+    fd = socket(type, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        printf("create socket failed, errno: %d\n", errno);
+        return -1;
+    }
+
+    if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1) {
+        printf("set socket nonblock failed, errno: %d\n", errno);
+        goto err;
+    }
+
+    size = 1 * 1024 * 1024;
+    if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(int)) < 0) {
+        printf("setsockopt failed, errno: %d\n", errno);
+        goto err;
+    }
+
+    if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(int)) < 0) {
+        printf("setsockopt failed, errno: %d\n", errno);
+        goto err;
+    }
+
+    /* connect to peer addr */
+    if (connect(fd, (struct sockaddr *)saddr, saddr_len) < 0) {
+        printf("connect socket failed, errno: %d\n", errno);
+        goto err;
+    }
+
+    return fd;
+
+err:
+    close(fd);
+    return -1;
+}
+
+
+
+void
+client_socket_write_handler(user_conn_t *user_conn)
+{
+    client_ctx_t *p_ctx;
+    p_ctx = user_conn->ctx;
+
+    xqc_conn_continue_send(p_ctx->engine, &user_conn->cid);
+
+    return;
+}
+
+
+
+void
+client_socket_read_handler(user_conn_t *user_conn, int fd)
+{
+    xqc_int_t ret;
+    ssize_t recv_size = 0;
+    ssize_t recv_sum = 0;
+
+    client_ctx_t *p_ctx;
+    p_ctx = user_conn->ctx;
+    unsigned char packet_buf[XQC_PACKET_TMP_BUF_LEN];
+
+    static ssize_t last_rcv_sum = 0;
+    static ssize_t rcv_sum = 0;
+
+    do {
+        recv_size = recvfrom(fd,
+                             packet_buf, sizeof(packet_buf), 0, 
+                             user_conn->peer_addr, &user_conn->peer_addrlen);
+        if (recv_size < 0 && errno == EAGAIN) {
+            break;
+        }
+
+        if (recv_size < 0) {
+            printf("recvfrom: recvmsg = %zd(%s)\n", recv_size, strerror(errno));
+            break;
+        }
+
+        /* if recv_size is 0, break while loop, */
+        if (recv_size == 0) {
+            break;
+        }
+
+        recv_sum += recv_size;
+        rcv_sum += recv_size;
+
+        if (user_conn->get_local_addr == 0) {
+            user_conn->get_local_addr = 1;
+            socklen_t tmp = sizeof(struct sockaddr_in6);
+            int ret = getsockname(user_conn->fd, (struct sockaddr *) user_conn->local_addr, &tmp);
+            if (ret < 0) {
+                printf("getsockname error, errno: %d\n", errno);
+                break;
+            }
+            user_conn->local_addrlen = tmp;
+        }
+
+        uint64_t recv_time = now();
+
+        ret = xqc_engine_packet_process(p_ctx->engine, packet_buf, recv_size,
+                                      user_conn->local_addr, user_conn->local_addrlen,
+                                      user_conn->peer_addr, user_conn->peer_addrlen,
+                                      (xqc_msec_t)recv_time, user_conn);
+        if (ret != XQC_OK) {
+            printf("xqc_client_read_handler: packet process err, ret: %d\n", ret);
+            return;
+        }
+
+    } while (recv_size > 0);
+
+    xqc_engine_finish_recv(p_ctx->engine);
+    return;
+}
+
+/* write and read 的实际action，linux系统就是调用read和write接口 */
+void
+client_socket_event_callback(int fd, short what, void *arg)
+{
+    //DEBUG;
+    user_conn_t *user_conn = (user_conn_t *) arg;
+
+    if (what & EV_WRITE) {
+        client_socket_write_handler(user_conn);
+
+    } else if (what & EV_READ) {
+        client_socket_read_handler(user_conn, fd);
+
+    } else {
+        printf("event callback: what=%d\n", what);
+        exit(1);
+    }
+}
+
+
+
+/* 用于限制单个连接的存活时间 */
+void
+client_timeout_callback(int fd, short what, void *arg)
+{
+    user_conn_t *user_conn = (user_conn_t *) arg;
+    int rc;
+    client_ctx_t *ctx = user_conn->ctx;
+
+    rc = xqc_conn_close(ctx->engine, &user_conn->cid);
+    if (rc) {
+        printf("xqc_conn_close error\n");
+        return;
+    }
+    ctx->cur_conn_num--;
+
+    printf("xqc_conn_close, %d connetion rest\n", ctx->cur_conn_num);
 }
 
 int
@@ -471,24 +687,13 @@ client_print_stats(void)
     return 0;
 }
 
+
 void
 client_print_stat_thread(void)
 {
     while(1) {
         client_print_stats();
         static int n_second = 0;
-
-        if(n_second % 10 == 0){
-            g_session_len = client_read_file_data(g_session_ticket_data, sizeof(g_session_ticket_data), "test_session");
-            if(g_session_len <= 0){
-                printf("*********g_session_len :%d, g_tp_len:%d\n", g_session_len, g_tp_len);
-            }
-
-            g_token_len = client_read_token(g_token, sizeof(g_token));
-            if(g_token_len < 0){
-                g_token_len = 0;
-            }
-        }
 
         if(n_second % 30 == 0){
 
