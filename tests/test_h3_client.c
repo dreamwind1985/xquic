@@ -12,7 +12,7 @@
 
 int g_ipv6 = 0;
 user_conn_t * g_cur_user_conn = NULL;
-int g_conn_timeout = 300;
+int g_conn_timeout = 120;
 
 int g_send_body_size = 1024;
 static char g_header_buffer[MAX_HEAD_BUF_LEN];
@@ -169,10 +169,11 @@ xqc_client_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_notify_
             printf("xqc_h3_request_recv_headers error\n");
             return -1;
         }
-        for (int i = 0; i < headers->count; i++) {
-            //printf("%s = %s\n",(char*)headers->headers[i].name.iov_base, (char*)headers->headers[i].value.iov_base);
+        if (g_debug_flag) {
+            for (int i = 0; i < headers->count; i++) {
+                printf("%s = %s\n",(char*)headers->headers[i].name.iov_base, (char*)headers->headers[i].value.iov_base);
+            }
         }
-
         user_stream->header_recvd = 1;
 
         if (fin) {
@@ -377,6 +378,40 @@ xqc_client_create_conn_callback(int fd, short what, void *arg)
     return;
 }
 
+
+#define FIRST_OCTET_LEN     1
+#define SERVER_ID_LEN       3
+#define ENTROPY_LEN         4
+#define WORKER_ID_LEN       4
+#define WORKER_ID_BIT       22
+#define WORKER_ID_MASK      0x0FFF
+ssize_t
+xqc_cid_generate_callback(const xqc_cid_t *ori_cid, uint8_t *cid_buf, size_t cid_buflen, void *engine_user_data)
+{
+    ssize_t              cid_buf_index = 0;
+    cid_buf_index += FIRST_OCTET_LEN;
+    
+    char cid[SERVER_ID_LEN];
+    cid[0] = random()%256;
+    cid[1] = random()%256;
+    cid[2] = random()%256;
+    memcpy(cid_buf + cid_buf_index, (void *)cid, SERVER_ID_LEN);
+    
+    cid_buf_index += SERVER_ID_LEN;
+    cid_buf_index += ENTROPY_LEN;
+    
+    if (cid_buf_index + WORKER_ID_LEN > cid_buflen) {
+    
+        printf("error generate id for worker_id\n");
+        return 0;
+    }
+
+    int worker_id = 0x12345678;
+    memcpy(cid_buf + cid_buf_index, (void *)(&worker_id), WORKER_ID_LEN);
+    cid_buf_index += WORKER_ID_LEN;
+    return cid_buf_index;
+}
+
 client_ctx_t *
 xqc_client_create_ctx(xqc_engine_ssl_config_t *engine_ssl_config,
     xqc_transport_callbacks_t *tcbs, xqc_config_t *config)
@@ -394,6 +429,8 @@ xqc_client_create_ctx(xqc_engine_ssl_config_t *engine_ssl_config,
             .xqc_log_write_stat = client_write_log,
         },
         .keylog_cb = client_keylog_cb,
+        .cid_generate_cb = xqc_cid_generate_callback, /* 设置cid */
+        //.cid_generate_cb = NULL, /* 设置cid */
     };
 
 
@@ -422,7 +459,6 @@ xqc_client_create_ctx(xqc_engine_ssl_config_t *engine_ssl_config,
     }
     return ctx;
 }
-
 
 int
 main(int argc, char *argv[])
@@ -499,7 +535,7 @@ main(int argc, char *argv[])
         .save_session_cb = client_save_session_cb,
         .save_tp_cb = client_save_tp_cb,
         .cert_verify_cb = client_cert_verify,
-        .conn_update_cid_notify = NULL,
+        .conn_update_cid_notify = client_conn_update_cid_notify,
         .ready_to_create_path_notify = NULL,
         .path_removed_notify = NULL,
         .conn_closing = client_conn_closing_notify,

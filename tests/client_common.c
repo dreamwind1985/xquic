@@ -15,7 +15,7 @@
 #define HTTP_BODY_MAX_SIZE 1024*1024
 
 
-
+int     g_debug_flag = 0;
 char    g_server_addr[64];
 int     g_server_port;
 int     g_use_1rtt = 0;
@@ -425,7 +425,7 @@ client_engine_callback(int fd, short what, void *arg)
 int
 client_check_close_user_conn(user_conn_t * user_conn)
 {
-    if(user_conn->cur_stream_num > 0 || user_conn->total_stream_num < g_stream_num_per_conn ){
+    if(user_conn->cur_stream_num > 0 || user_conn->total_stream_num <= g_stream_num_per_conn ){
         return 0;
     }
 
@@ -442,6 +442,19 @@ client_check_close_user_conn(user_conn_t * user_conn)
     }
     return 0;
 }
+
+void
+client_conn_update_cid_notify(xqc_connection_t *conn, const xqc_cid_t *retire_cid, const xqc_cid_t *new_cid, void *user_data)
+{
+    user_conn_t *user_conn = (user_conn_t *) user_data;
+    memcpy(&user_conn->cid, new_cid, sizeof(*new_cid));
+    //if (g_debug_flag) {
+        client_ctx_t *ctx = user_conn->ctx;
+        printf("====>SCID:%s\n", xqc_scid_str(new_cid));
+        printf("====>DCID:%s\n", xqc_dcid_str_by_scid(ctx->engine, new_cid));
+    //}
+}
+
 
 void
 client_init_addr(user_conn_t *user_conn,
@@ -695,11 +708,12 @@ client_print_stat_thread(void)
         client_print_stats();
         static int n_second = 0;
 
+        
         if(n_second % 30 == 0){
 
             int i = 0;
             for(i = 0; i < MAX_PROCESS_NUM; i++){
-                printf("proc_n:%d\t hash_count:%lu\n",i,g_process_count_array[i]);
+                //printf("proc_n:%d\t hash_count:%lu\n",i,g_process_count_array[i]);
             }
             printf("\n");
         }
@@ -718,8 +732,8 @@ client_parse_args(int argc, char *argv[])
             "-a server address, default 127.0.0.1\n"
             "-p server port, default 8443\n"
             "-r 0rtt 0, 1RTT 1,default 0\n"
-            "-t text crypto: 0, no crypto 1, default 0"
-            "-c create connection per second, default 10\n"
+            "-t text crypto: 0, no crypto 1, default 0\n"
+            "-c create connection per second, default 1\n"
             "-C MAX connection num, default 1000 \n"
             "-s max stream num per conn, default 10 \n"
             "-q qpack header key_value num ,default 10\n"
@@ -730,9 +744,10 @@ client_parse_args(int argc, char *argv[])
             "-I request create interval, default 0\n"
             "-u host url, default 127.0.0.1\n"
             "-H header file path\n"
+            "-D print debug info to std io\n"
             "-h print help\n");
     sleep(1);
-    while ((ch = getopt(argc, argv, "a:p:r:t:c:C:s:q:b:m:P:Q:I:u:H:h")) != -1) {
+    while ((ch = getopt(argc, argv, "a:p:r:t:c:C:s:q:b:m:P:Q:I:u:H:Dh")) != -1) {
         switch(ch)
         {
             case 'a':
@@ -808,6 +823,10 @@ client_parse_args(int argc, char *argv[])
             case 'H':
                 printf("header file path:%s\n", optarg);
                 snprintf(g_header_file, sizeof(g_header_file), optarg);
+                break;
+            case 'D':
+                printf("debug info print:%s\n", optarg);
+                g_debug_flag = 1;
                 break;
             case 'h':
                 printf("help info already print\n");

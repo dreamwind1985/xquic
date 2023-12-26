@@ -114,7 +114,7 @@ typedef struct user_conn_s {
 } user_conn_t;
 
 
-
+extern int      g_debug_flag;
 extern char     g_server_addr[64];
 extern int      g_server_port;
 extern int      g_use_1rtt;
@@ -197,5 +197,6 @@ int client_create_socket(int type,
     const struct sockaddr *saddr, socklen_t saddr_len, char *interface);
 void client_init_addr(user_conn_t *user_conn,
     const char *server_addr, int server_port);
-
+void client_conn_update_cid_notify(xqc_connection_t *conn,
+    const xqc_cid_t *retire_cid, const xqc_cid_t *new_cid, void *user_data);
 #endif  /* __CLIENT_COMMON_H__ */
