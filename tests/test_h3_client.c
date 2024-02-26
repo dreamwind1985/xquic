@@ -392,9 +392,9 @@ xqc_cid_generate_callback(const xqc_cid_t *ori_cid, uint8_t *cid_buf, size_t cid
     cid_buf_index += FIRST_OCTET_LEN;
     
     char cid[SERVER_ID_LEN];
-    cid[0] = random()%256;
-    cid[1] = random()%256;
-    cid[2] = random()%256;
+    cid[0] = 0;//random()%256;
+    cid[1] = 0;//random()%256;
+    cid[2] = 0;//random()%256;
     memcpy(cid_buf + cid_buf_index, (void *)cid, SERVER_ID_LEN);
     
     cid_buf_index += SERVER_ID_LEN;
