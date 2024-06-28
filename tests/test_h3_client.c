@@ -24,6 +24,8 @@ int g_conn_count = 0;
 
 int g_transport = 0;
 
+int xqc_client_user_conn_close(user_conn_t *user_conn);
+
 int
 xqc_client_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, void *user_data)
 {
@@ -33,8 +35,17 @@ xqc_client_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, void 
     client_ctx_t * p_ctx = user_conn->ctx;
     xqc_conn_stats_t stats = xqc_conn_get_stats(p_ctx->engine, cid);
     //printf("send_count:%u, lost_count:%u, tlp_count:%u\n", stats.send_count, stats.lost_count, stats.tlp_count);
+    
+    if (user_conn->ev_socket) {
+        event_del(user_conn->ev_socket);
+        if (user_conn->fd != -1) {
+            close(user_conn->fd);
+        }
+        user_conn->fd = -1;
+    } 
+    g_user_stats.conc_conn_count--;
 
-    if (p_ctx->cur_conn_num == 0) {
+    if (p_ctx->cur_conn_num == 0 && g_conn_count >= g_max_conn_num) {
         event_base_loopbreak(p_ctx->eb);
     }
     return 0;
@@ -53,10 +64,17 @@ void
 xqc_client_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
 {
     static int g_hc;
-
-    printf("connection handshake finished:%d\n", ++g_hc);
+    //if (g_hc % 100 == 0) {
+        printf("connection handshake finished:%d\n", ++g_hc);
+    //}
     user_conn_t *user_conn = (user_conn_t *) user_data;
     client_ctx_t *p_ctx = user_conn->ctx;
+    if (g_stream_num_per_conn == 0) {
+        int ret = xqc_client_user_conn_close(user_conn);
+        if (ret != 0) {
+            printf("error close connection\n"); 
+        }
+    }
     return;
 }
 
@@ -263,6 +281,25 @@ xqc_client_create_req_callback(int fd, short what, void *arg)
     }
 }
 
+int
+xqc_client_user_conn_close(user_conn_t *user_conn)
+{
+    client_ctx_t *ctx = user_conn->ctx;
+    if (user_conn->ev_timeout) {
+        event_del(user_conn->ev_timeout);
+    }
+    client_ctx_t *p_ctx = user_conn->ctx;
+    if (p_ctx) {
+        int ret = xqc_h3_conn_close(p_ctx->engine, &(user_conn->cid));
+        if (ret != 0) {
+            printf("error close connection\n");
+            return ret;
+        }
+        p_ctx->cur_conn_num--;
+    }
+
+    return 0;
+}
 
 user_conn_t * 
 xqc_client_user_conn_create(client_ctx_t *ctx, const char *server_addr, int server_port,
@@ -366,6 +403,10 @@ xqc_client_create_conn_callback(int fd, short what, void *arg)
 
         g_conn_count++;
         ctx->cur_conn_num++;
+        g_user_stats.conc_conn_count++;
+        g_user_stats.total_conn_count++;
+
+
         memcpy(&user_conn->cid, cid, sizeof(*cid));
         user_conn->ctx = ctx;
         user_conn->ev_req = event_new(ctx->eb, -1, 0, xqc_client_create_req_callback, user_conn); 

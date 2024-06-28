@@ -285,7 +285,7 @@ int
 client_conn_closing_notify(xqc_connection_t *conn,
     const xqc_cid_t *cid, xqc_int_t err_code, void *conn_user_data)
 {
-    printf("conn closing: %d\n", err_code);
+    //printf("conn closing: %d\n", err_code);
     return XQC_OK;
 }
 
@@ -316,6 +316,9 @@ client_create_user_stream(xqc_engine_t * engine, user_conn_t *user_conn, xqc_cid
         }
     }
     user_stream->user_conn = user_conn;
+    g_user_stats.conc_stream_count++;
+    g_user_stats.total_stream_count++;
+
     client_fill_stream_http_header(&user_stream->http_header);
     return user_stream;
 }
@@ -594,7 +597,10 @@ client_socket_read_handler(user_conn_t *user_conn, int fd)
             printf("xqc_client_read_handler: packet process err, ret: %d\n", ret);
             return;
         }
-
+	
+	if (recv_size > 0) {
+	    g_user_stats.recv_bytes_count += recv_size;
+	}
     } while (recv_size > 0);
 
     xqc_engine_finish_recv(p_ctx->engine);
@@ -648,6 +654,7 @@ client_print_stats(void)
     static user_stats_t last_user_stats;
 
     uint64_t cur_time = now();
+    int pid = getpid();
 
     if (last_record_time == 0) {
         fprintf(g_stats_fp,"conn_per_second:%d, max connection:%d, \
@@ -671,8 +678,8 @@ client_print_stats(void)
                 tm.tm_year, tm.tm_mon,
                 tm.tm_mday, tm.tm_hour,
                 tm.tm_min, tm.tm_sec, tv.tv_usec);
-        fprintf(g_stats_fp, "total_conn:%lu, total_stream:%lu, conc_conn:%lu, conc_stream:%lu, total_send:%lu, total_recv:%lu, total_req:%lu, total_res:%lu\n",
-                g_user_stats.total_conn_count, g_user_stats.total_stream_count, g_user_stats.conc_conn_count, g_user_stats.conc_stream_count,
+        fprintf(g_stats_fp, "pid:%d, total_conn:%lu, total_stream:%lu, conc_conn:%lu, conc_stream:%lu, total_send:%lu, total_recv:%lu, total_req:%lu, total_res:%lu\n",
+                pid, g_user_stats.total_conn_count, g_user_stats.total_stream_count, g_user_stats.conc_conn_count, g_user_stats.conc_stream_count,
                 g_user_stats.send_bytes_count, g_user_stats.recv_bytes_count, g_user_stats.send_request_count, g_user_stats.recv_response_count);
 
         uint64_t past_time = cur_time - last_record_time;
