@@ -24,18 +24,22 @@ int g_conn_count = 0;
 
 int g_transport = 0;
 
-int xqc_client_user_conn_close(user_conn_t *user_conn);
+int
+xqc_client_conn_create_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data)
+{
+    user_conn_t *user_conn = (user_conn_t *)user_data;
+    xqc_conn_set_alp_user_data(conn, user_conn);
+
+    user_conn->quic_conn = conn;
+
+    //printf("xqc_conn_is_ready_to_send_early_data:%d\n", xqc_conn_is_ready_to_send_early_data(conn));
+    return 0;
+}
+
 
 int
-xqc_client_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, void *user_data)
+xqc_release_user_conn(user_conn_t *user_conn)
 {
-    user_conn_t *user_conn = (user_conn_t *) user_data;
-    //printf("conn errno:%d\n", xqc_h3_conn_get_errno(conn));
-
-    client_ctx_t * p_ctx = user_conn->ctx;
-    xqc_conn_stats_t stats = xqc_conn_get_stats(p_ctx->engine, cid);
-    //printf("send_count:%u, lost_count:%u, tlp_count:%u\n", stats.send_count, stats.lost_count, stats.tlp_count);
-    
     if (user_conn->ev_socket) {
         event_del(user_conn->ev_socket);
         if (user_conn->fd != -1) {
@@ -45,10 +49,110 @@ xqc_client_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, void 
     } 
     g_user_stats.conc_conn_count--;
 
+    client_ctx_t * p_ctx = user_conn->ctx;
+    p_ctx->cur_conn_num--;
     if (p_ctx->cur_conn_num == 0 && g_conn_count >= g_max_conn_num) {
         event_base_loopbreak(p_ctx->eb);
     }
     return 0;
+}
+
+int
+xqc_client_conn_close_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data)
+{
+    user_conn_t *user_conn = (user_conn_t *)user_data;
+    int ret = 0;
+    if (user_conn) {
+        ret = xqc_release_user_conn(user_conn); 
+    } 
+    return 0;
+}
+
+
+int
+xqc_client_user_close_conn_proactive(user_conn_t *user_conn)
+{
+    client_ctx_t *ctx = user_conn->ctx;
+    if (user_conn->ev_timeout) {
+        event_del(user_conn->ev_timeout);
+    }
+    client_ctx_t *p_ctx = user_conn->ctx;
+    if (p_ctx) {
+        int ret = xqc_conn_close(p_ctx->engine, &(user_conn->cid));
+        if (ret != 0) {
+            printf("error close connection\n");
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
+int 
+xqc_handshake_finished(user_conn_t *user_conn)
+{
+    int ret = 0;
+    static int g_hc;
+    if (g_hc % 100 == 0) {
+        printf("connection handshake finished:%d\n", ++g_hc);
+    }
+
+    if (g_stream_num_per_conn == 0) {
+        ret = xqc_client_user_close_conn_proactive(user_conn);
+        if (ret != 0) {
+            printf("error close connection\n"); 
+        }
+    }
+    return ret;
+}
+
+
+void
+xqc_client_conn_handshake_finished(xqc_connection_t *conn, void *user_data, void *conn_proto_data)
+{
+    user_conn_t *user_conn = (user_conn_t *) user_data;
+
+    client_ctx_t *p_ctx = user_conn->ctx;
+    if (user_conn) {
+        xqc_handshake_finished(user_conn);
+    }
+}
+
+
+void
+xqc_client_conn_ping_acked_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *ping_user_data, void *user_data, void *conn_proto_data)
+{
+    return;
+}
+
+int
+xqc_client_stream_write_notify(xqc_stream_t *stream, void *user_data)
+{
+    return 0;
+}
+
+int
+xqc_client_stream_read_notify(xqc_stream_t *stream, void *user_data)
+{
+    return 0;
+}
+
+int
+xqc_client_stream_close_notify(xqc_stream_t *stream, void *user_data)
+{
+    return 0;
+} 
+int
+xqc_client_h3_conn_close_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, void *user_data)
+{
+    user_conn_t *user_conn = (user_conn_t *) user_data;
+
+    int ret = 0;
+    if (user_conn) {
+        ret = xqc_release_user_conn(user_conn);
+    }
+
+    return ret;
 }
 
 int
@@ -63,19 +167,10 @@ xqc_client_h3_conn_create_notify(xqc_h3_conn_t *conn, const xqc_cid_t *cid, void
 void
 xqc_client_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *user_data)
 {
-    static int g_hc;
-    //if (g_hc % 100 == 0) {
-        printf("connection handshake finished:%d\n", ++g_hc);
-    //}
     user_conn_t *user_conn = (user_conn_t *) user_data;
-    client_ctx_t *p_ctx = user_conn->ctx;
-    if (g_stream_num_per_conn == 0) {
-        int ret = xqc_client_user_conn_close(user_conn);
-        if (ret != 0) {
-            printf("error close connection\n"); 
-        }
+    if (user_conn) {
+        xqc_handshake_finished(user_conn);
     }
-    return;
 }
 
 void
@@ -281,25 +376,6 @@ xqc_client_create_req_callback(int fd, short what, void *arg)
     }
 }
 
-int
-xqc_client_user_conn_close(user_conn_t *user_conn)
-{
-    client_ctx_t *ctx = user_conn->ctx;
-    if (user_conn->ev_timeout) {
-        event_del(user_conn->ev_timeout);
-    }
-    client_ctx_t *p_ctx = user_conn->ctx;
-    if (p_ctx) {
-        int ret = xqc_h3_conn_close(p_ctx->engine, &(user_conn->cid));
-        if (ret != 0) {
-            printf("error close connection\n");
-            return ret;
-        }
-        p_ctx->cur_conn_num--;
-    }
-
-    return 0;
-}
 
 user_conn_t * 
 xqc_client_user_conn_create(client_ctx_t *ctx, const char *server_addr, int server_port,
@@ -365,6 +441,24 @@ xqc_client_create_conn_callback(int fd, short what, void *arg)
         exit(-1);
     }
 
+    /* register transport callbacks */
+    xqc_app_proto_callbacks_t ap_cbs = {
+        .conn_cbs = {
+            .conn_create_notify = xqc_client_conn_create_notify,
+            .conn_close_notify = xqc_client_conn_close_notify,
+            .conn_handshake_finished = xqc_client_conn_handshake_finished,
+            .conn_ping_acked = xqc_client_conn_ping_acked_notify,
+        },
+        .stream_cbs = {
+            .stream_write_notify = xqc_client_stream_write_notify,
+            .stream_read_notify = xqc_client_stream_read_notify,
+            .stream_close_notify = xqc_client_stream_close_notify,
+        }
+    };
+
+    xqc_engine_register_alpn(ctx->engine, XQC_ALPN_TRANSPORT, 9, &ap_cbs);
+
+
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));
 
@@ -391,7 +485,7 @@ xqc_client_create_conn_callback(int fd, short what, void *arg)
                              user_conn->peer_addrlen, XQC_DEFINED_ALPN_H3_EXT, user_conn);
         } else {
             cid = xqc_connect(ctx->engine, g_conn_settings, user_conn->token, user_conn->token_len,
-                          "127.0.0.1", g_no_crypto_flag, &conn_ssl_config, user_conn->peer_addr, 
+                          g_host, g_no_crypto_flag, &conn_ssl_config, user_conn->peer_addr, 
                           user_conn->peer_addrlen, XQC_ALPN_TRANSPORT, user_conn);
 
         }
