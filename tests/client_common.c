@@ -32,6 +32,7 @@ int     g_tp_len = 0;
 FILE    * g_stats_fp;
 int     g_req_per_time = 1;
 int     g_req_intval = 1000; /* 单位毫秒 */
+int     g_transport = 0;
 user_stats_t g_user_stats;
 char g_session_ticket_data[8192]={0};
 char g_tp_data[8192] = {0};
@@ -750,11 +751,12 @@ client_parse_args(int argc, char *argv[])
             "-Q request num create per time: default 1\n"
             "-I request create interval, default 0\n"
             "-u host url, default 127.0.0.1\n"
+            "-T Transport protocol: 0 H3 (default), 1 Transport layer, 2 H3-ext.\n"
             "-H header file path\n"
             "-D print debug info to std io\n"
             "-h print help\n");
     sleep(1);
-    while ((ch = getopt(argc, argv, "a:p:r:t:c:C:s:q:b:m:P:Q:I:u:H:Dh")) != -1) {
+    while ((ch = getopt(argc, argv, "a:p:r:t:c:C:s:q:b:m:P:Q:I:u:T:H:Dh")) != -1) {
         switch(ch)
         {
             case 'a':
@@ -826,6 +828,10 @@ client_parse_args(int argc, char *argv[])
             case 'u': /* Url. default https://test.xquic.com/path/resource */
                 printf("option url :%s\n", optarg);
                 sscanf(optarg, "%[^://]://%[^/]%s", g_scheme, g_host, g_path);
+                break;
+            case 'T': /* Transport layer. No HTTP3. */
+                printf("option transport :%s\n", "on");
+                g_transport = atoi(optarg);
                 break;
             case 'H':
                 printf("header file path:%s\n", optarg);

@@ -21,8 +21,7 @@ int g_header_array_read_count = 0;
 xqc_conn_settings_t *g_conn_settings;
 
 int g_conn_count = 0;
-
-int g_transport = 0;
+extern int g_transport;
 
 int
 xqc_client_conn_create_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data)
@@ -93,8 +92,9 @@ xqc_handshake_finished(user_conn_t *user_conn)
 {
     int ret = 0;
     static int g_hc;
+    g_hc++;
     if (g_hc % 100 == 0) {
-        printf("connection handshake finished:%d\n", ++g_hc);
+        printf("connection handshake finished:%d\n", g_hc);
     }
 
     if (g_stream_num_per_conn == 0) {
