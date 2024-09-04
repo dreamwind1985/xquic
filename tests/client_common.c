@@ -65,6 +65,10 @@ client_save_session_cb(const char * data, size_t data_len, void *user_data)
     user_conn_t *user_conn = (user_conn_t*)user_data;
 
     FILE * fp  = fopen(SESSION_FILE, "wb");
+    if (fp == NULL) {
+        printf("open session file error\n");
+        return;
+    }
     int write_size = fwrite(data, 1, data_len, fp);
     if(data_len != write_size){
         printf("save _session_cb error\n");
