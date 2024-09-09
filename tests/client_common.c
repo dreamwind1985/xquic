@@ -736,7 +736,7 @@ client_print_stat_thread(void)
 }
 
 int
-client_parse_args(int argc, char *argv[])
+client_parse_args(int argc, char *argv[], client_arg_parse_callback c_cb, char *c_args)
 {
 
     int ch = 0;
@@ -760,7 +760,9 @@ client_parse_args(int argc, char *argv[])
             "-D print debug info to std io\n"
             "-h print help\n");
     sleep(1);
-    while ((ch = getopt(argc, argv, "a:p:r:t:c:C:s:q:b:m:P:Q:I:u:T:H:Dh")) != -1) {
+    char args[2048] = {0};
+    snprintf(args, sizeof(args), "a:p:r:t:c:C:s:q:b:m:P:Q:I:u:T:H:Dh%s", c_args);
+    while ((ch = getopt(argc, argv, args)) != -1) {
         switch(ch)
         {
             case 'a':
@@ -849,6 +851,12 @@ client_parse_args(int argc, char *argv[])
                 printf("help info already print\n");
                 return -2; 
             default:
+                if (c_cb) {
+                    xqc_int_t ret = c_cb(ch, optarg);
+                    if (ret == XQC_OK) {
+                        break;
+                    }
+                }
                 printf("other option :%c\n", ch);
                 return -1;
 

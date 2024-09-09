@@ -146,6 +146,7 @@ extern char     g_path[256];
 extern char     g_scheme[8];
 
 
+typedef xqc_int_t (*client_arg_parse_callback)(int ch, char *p_arg); 
 
 static inline uint64_t
 now()
@@ -173,7 +174,7 @@ void client_keylog_cb(const xqc_cid_t *scid, const char *line, void *user_data);
 
 int client_print_stats(void);
 void client_print_stat_thread(void);
-int client_parse_args(int argc, char *argv[]);
+int client_parse_args(int argc, char *argv[], client_arg_parse_callback c_cb, char *c_args);
 void xqc_convert_addr_text_to_sockaddr(int type,
     const char *addr_text, unsigned int port,
     struct sockaddr **saddr, socklen_t *saddr_len);
@@ -199,4 +200,5 @@ void client_init_addr(user_conn_t *user_conn,
     const char *server_addr, int server_port);
 void client_conn_update_cid_notify(xqc_connection_t *conn,
     const xqc_cid_t *retire_cid, const xqc_cid_t *new_cid, void *user_data);
+
 #endif  /* __CLIENT_COMMON_H__ */
