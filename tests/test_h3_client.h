@@ -22,7 +22,10 @@
 #include <./src/transport/xqc_conn.h>
 #include <getopt.h>
 #include <src/common/xqc_hash.h>
-#include "client_common.h" 
+
+#define XQC_ALPN_TRANSPORT      "transport"
+#define DEFAULT_CID_LEN 16
+
 int client_test_conn_create_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data);
 int client_test_release_user_conn(user_conn_t *user_conn);
 int client_test_conn_close_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data);

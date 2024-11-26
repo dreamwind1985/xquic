@@ -2,17 +2,15 @@
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
 #include "client_common.h" 
-
+#include "test_h3_client.h"
 
 #define _GNU_SOURCE
-#define DEFAULT_CID_LEN 16
-#define XQC_ALPN_TRANSPORT      "transport"
 
-int g_conn_timeout = 120;
+extern int g_conn_timeout;
 
 xqc_conn_settings_t *g_conn_settings;
 
-int g_conn_count = 0;
+extern int g_conn_count;
 extern int g_transport;
 
 int
