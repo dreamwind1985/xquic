@@ -33,6 +33,8 @@ FILE    * g_stats_fp;
 int     g_req_per_time = 1;
 int     g_req_intval = 1000; /* 单位毫秒 */
 int     g_transport = 0;
+int     g_conn_timeout = 120;
+xqc_conn_settings_t *g_conn_settings = NULL;
 user_stats_t g_user_stats;
 char g_session_ticket_data[8192]={0};
 char g_tp_data[8192] = {0};
@@ -299,6 +301,91 @@ client_fill_stream_http_header(xqc_http_headers_t *http_header)
 {
     http_header->headers = g_headers;
     http_header->count = g_header_cnt;
+}
+
+int 
+client_initial_global_var()
+{
+     memset(&g_user_stats, 0, sizeof(user_stats_t));
+
+    g_stats_fp = fopen("b_stats", "wb");
+    if (g_stats_fp == NULL) {
+        return XQC_ERROR;
+    }
+
+    g_session_len = client_read_file_data(g_session_ticket_data, sizeof(g_session_ticket_data), "test_session");
+    g_tp_len = client_read_file_data(g_tp_data, sizeof(g_tp_data), "tp_localhost");
+
+    g_token_len = client_read_token(g_token, sizeof(g_token));
+    if (g_token_len < 0) {
+        g_token_len = 0;
+    }
+
+    xqc_cong_ctrl_callback_t cong_ctrl;
+    cong_ctrl = xqc_bbr_cb;
+
+    xqc_conn_settings_t conn_settings = {
+        .pacing_on  =   0,
+        .ping_on    =   0,
+        .cong_ctrl_callback = cong_ctrl,
+        .cc_params  =   {
+            .customize_on = 1, 
+            .init_cwnd = 32, 
+            .cc_optimization_flags = 0, 
+            .copa_delta_ai_unit = 0, 
+            .copa_delta_base = 0,
+        },
+        .spurious_loss_detect_on = 0,
+        .keyupdate_pkt_threshold = 0,
+        .max_datagram_frame_size = 0,
+        .enable_multipath = 0,
+        .marking_reinjection = 1,
+        .mp_ping_on = 0,
+    };
+    conn_settings.proto_version = XQC_VERSION_V1;
+    g_conn_settings = &conn_settings;
+    
+    return XQC_OK;
+}
+
+int
+client_fork_multi_process()
+{
+    int i = 0;
+
+    for(i = 0; i < MAX_PROCESS_NUM; i++) {
+        g_process_count_array[i] = 0;
+    }
+
+    pid_t pid;
+    for(i = 1; i < g_process_num; i++) {
+        pid = fork();
+        if(pid < 0) {
+            printf("error create process, current process num:%d, need create process:%d\n", i, g_process_num);
+            return XQC_ERROR;
+        } else if(pid == 0) {
+            printf("Current Pid = %d , Parent Pid = %d\n", getpid(), getppid());
+            break;
+        } else {
+            sleep(1);
+        }
+    }
+    return XQC_OK;
+}
+
+client_ctx_t *
+client_create_and_initial_ctx()
+{
+    client_ctx_t * ctx = malloc(sizeof(client_ctx_t));
+    if (ctx == NULL) {
+        return NULL;
+    }
+    memset(ctx, 0, sizeof(client_ctx_t));
+
+    client_open_keylog_file(ctx);
+    client_open_log_file(ctx);
+    
+    return ctx;
 }
 
 
@@ -603,9 +690,9 @@ client_socket_read_handler(user_conn_t *user_conn, int fd)
             return;
         }
 	
-	if (recv_size > 0) {
-	    g_user_stats.recv_bytes_count += recv_size;
-	}
+	    if (recv_size > 0) {
+	        g_user_stats.recv_bytes_count += recv_size;
+	    }
     } while (recv_size > 0);
 
     xqc_engine_finish_recv(p_ctx->engine);
@@ -633,6 +720,40 @@ client_socket_event_callback(int fd, short what, void *arg)
 
 
 
+user_conn_t * 
+client_create_user_conn_and_event(client_ctx_t *ctx, const char *server_addr,
+    int server_port, int transport)
+{
+    user_conn_t *user_conn = calloc(1, sizeof(user_conn_t));
+    /* use HTTP3? */
+    user_conn->ctx = ctx;
+    user_conn->h3 = transport;
+
+    user_conn->ev_timeout = event_new(ctx->eb, -1, 0, client_timeout_callback, user_conn);
+    
+    /* set connection timeout */
+    struct timeval tv;
+    //g_conn_timeout = 120;
+    tv.tv_sec = g_conn_timeout;
+    tv.tv_usec = 0;
+    event_add(user_conn->ev_timeout, &tv);
+
+    int ip_type = AF_INET; /* 暂时不支持ipv6 */
+    client_init_addr(user_conn, server_addr, server_port);
+                                      
+    user_conn->fd = client_create_socket(ip_type, 
+            user_conn->peer_addr, user_conn->peer_addrlen, NULL);
+    if (user_conn->fd < 0) {
+        printf("xqc_create_socket error\n");
+        return NULL;
+    }
+    user_conn->ev_socket = event_new(ctx->eb, user_conn->fd, EV_READ | EV_PERSIST, 
+                                     client_socket_event_callback, user_conn);
+    event_add(user_conn->ev_socket, NULL);
+
+    return user_conn;
+}
+
 /* 用于限制单个连接的存活时间 */
 void
 client_timeout_callback(int fd, short what, void *arg)
@@ -650,6 +771,27 @@ client_timeout_callback(int fd, short what, void *arg)
 
     printf("xqc_conn_close, %d connetion rest\n", ctx->cur_conn_num);
 }
+
+
+int
+client_close_conn_proactive(user_conn_t *user_conn)
+{
+    client_ctx_t *ctx = user_conn->ctx;
+    if (user_conn->ev_timeout) {
+        event_del(user_conn->ev_timeout);
+    }
+    client_ctx_t *p_ctx = user_conn->ctx;
+    if (p_ctx) {
+        int ret = xqc_conn_close(p_ctx->engine, &(user_conn->cid));
+        if (ret != 0) {
+            printf("error close connection\n");
+            return ret;
+        }
+    }
+
+    return 0;
+}
+
 
 int
 client_print_stats(void)

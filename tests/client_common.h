@@ -2,7 +2,7 @@
 /**
  * @copyright Copyright (c) 2022, Alibaba Group Holding Limited
  */
-#ifndef __CLINET_COMMON_H__
+#ifndef __CLIENT_COMMON_H__
 #define __CLIENT_COMMON_H__
 #define _GNU_SOURCE
 #include <stdio.h>
@@ -37,7 +37,9 @@
 #define MAX_BUF_SIZE (100*1024*1024)
 //#define XQC_MAX_TOKEN_LEN 32
 #define MAX_HEADER_SIZE 128
-
+#define XQC_ALPN_TRANSPORT      "transport"
+#define XQC_ALPN_TRANSPORT_TEST "transport-test"
+#define DEFAULT_CID_LEN 16
 
 typedef struct user_conn_s user_conn_t;
 
@@ -111,6 +113,7 @@ typedef struct user_conn_s {
     int                 cur_stream_num;
     int                 total_stream_num;
     struct event       *ev_req;
+    void               *ext_data;
 } user_conn_t;
 
 
@@ -200,5 +203,12 @@ void client_init_addr(user_conn_t *user_conn,
     const char *server_addr, int server_port);
 void client_conn_update_cid_notify(xqc_connection_t *conn,
     const xqc_cid_t *retire_cid, const xqc_cid_t *new_cid, void *user_data);
-
+void client_socket_write_handler(user_conn_t *user_conn);
+void client_socket_read_handler(user_conn_t *user_conn, int fd);
+int client_close_conn_proactive(user_conn_t *user_conn);
+user_conn_t *client_create_user_conn_and_event(client_ctx_t *ctx, const char *server_addr,
+    int server_port, int transport);
+client_ctx_t *client_create_and_initial_ctx();
+int client_initial_global_var();
+int client_fork_multi_process();
 #endif  /* __CLIENT_COMMON_H__ */
