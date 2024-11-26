@@ -30,5 +30,6 @@ xqc_int_t poc_h3_request_format_headers(xqc_h3_request_t *h3_request,
                               xqc_http_headers_t *headers_in,
                               xqc_http_headers_t *headers,
                               uint8_t fin);
-
+int poc_crypto_stream_send(xqc_stream_t *stream, 
+    xqc_hs_buffer_t *buf, xqc_pkt_type_t pkt_type);
 #endif /* __POC_COMMON_H__ */

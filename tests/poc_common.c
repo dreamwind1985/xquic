@@ -426,6 +426,17 @@ poc_stream_send(xqc_stream_t *stream, unsigned char *send_data, size_t send_data
 
 }
 
+int
+poc_crypto_stream_send(xqc_stream_t *stream, 
+    xqc_hs_buffer_t *buf, xqc_pkt_type_t pkt_type)
+{
+    xqc_list_head_t crypto_data_list;
+    xqc_init_list_head(&crypto_data_list);
+    xqc_list_add_tail(&buf->list_head, &crypto_data_list);
+
+    return xqc_crypto_stream_send(stream, &crypto_data_list, pkt_type);
+}
+
 xqc_int_t
 poc_h3_stream_send_buffer(xqc_h3_stream_t *h3s)
 {
