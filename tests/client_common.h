@@ -183,9 +183,6 @@ void xqc_convert_addr_text_to_sockaddr(int type,
     struct sockaddr **saddr, socklen_t *saddr_len);
 ssize_t client_write_socket(const unsigned char *buf, size_t size,
     const struct sockaddr *peer_addr, socklen_t peer_addrlen, void *user);
-xqc_int_t 
-client_conn_closing_notify(xqc_connection_t *conn,
-    const xqc_cid_t *cid, xqc_int_t err_code, void *conn_user_data);
 user_stream_t *client_create_user_stream(xqc_engine_t * engine,
     user_conn_t *user_conn, xqc_cid_t * cid);
 int client_fill_default_headers(xqc_http_header_t *header_array,
@@ -201,8 +198,6 @@ int client_create_socket(int type,
     const struct sockaddr *saddr, socklen_t saddr_len, char *interface);
 void client_init_addr(user_conn_t *user_conn,
     const char *server_addr, int server_port);
-void client_conn_update_cid_notify(xqc_connection_t *conn,
-    const xqc_cid_t *retire_cid, const xqc_cid_t *new_cid, void *user_data);
 void client_socket_write_handler(user_conn_t *user_conn);
 void client_socket_read_handler(user_conn_t *user_conn, int fd);
 int client_close_conn_proactive(user_conn_t *user_conn);
@@ -211,4 +206,19 @@ user_conn_t *client_create_user_conn_and_event(client_ctx_t *ctx, const char *se
 client_ctx_t *client_create_and_initial_ctx();
 int client_initial_global_var();
 int client_fork_multi_process();
+/* notify 函数 */
+void client_conn_update_cid_notify(xqc_connection_t *conn,
+    const xqc_cid_t *retire_cid, const xqc_cid_t *new_cid, void *user_data);
+xqc_int_t client_conn_closing_notify(xqc_connection_t *conn,
+    const xqc_cid_t *cid, xqc_int_t err_code, void *conn_user_data);
+int client_stream_read_notify_null(xqc_stream_t *stream, void *user_data);
+int client_stream_close_notify_null(xqc_stream_t *stream, void *user_data);
+void client_conn_ping_acked_notify_null(xqc_connection_t *conn, const xqc_cid_t *cid, void *ping_user_data,
+    void *user_data, void *conn_proto_data);
+int client_conn_create_notify_default(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data,
+    void *conn_proto_data);
+void client_conn_handshake_finished_notify_default(xqc_connection_t *conn, void *user_data,
+    void *conn_proto_data);
+int client_conn_close_notify_default(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data,
+    void *conn_proto_data);
 #endif  /* __CLIENT_COMMON_H__ */

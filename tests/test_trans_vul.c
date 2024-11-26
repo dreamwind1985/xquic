@@ -9,10 +9,14 @@ extern int g_conn_timeout;
 
 extern xqc_conn_settings_t *g_conn_settings;
 
-int g_conn_count;
+extern int g_conn_count;
 int g_transport;
 
 
+/* 
+ * 用于持续往crytpo_stream流中发送short header封装的crypto frame
+ * 用于验证当frame的offset发生空洞时，收包缓存占用内存是否会持续增长
+ */
 int
 test_trans_stream_send(xqc_stream_t *stream, void *user_data)
 {
@@ -83,79 +87,8 @@ test_trans_create_stream_callback(int fd, short what, void *arg)
     }
 }
 
-
-int 
-client_test_handshake_finished(user_conn_t *user_conn)
-{
-    int ret = 0;
-    printf("connection handshake finished\n");
-    if (g_stream_num_per_conn == 0) {
-        ret = client_close_conn_proactive(user_conn);
-        if (ret != 0) {
-            printf("error close connection\n"); 
-        }
-    }
-    return ret;
-}
-
 int
-client_test_release_user_conn(user_conn_t *user_conn)
-{
-    if (user_conn->ev_socket) {
-        event_del(user_conn->ev_socket);
-        if (user_conn->fd != -1) {
-            close(user_conn->fd);
-        }
-        user_conn->fd = -1;
-    } 
-    g_user_stats.conc_conn_count--;
-
-    client_ctx_t * p_ctx = user_conn->ctx;
-    p_ctx->cur_conn_num--;
-    if (p_ctx->cur_conn_num == 0 && g_conn_count >= g_max_conn_num) {
-        event_base_loopbreak(p_ctx->eb);
-    }
-    return 0;
-}
-
-   
-int
-client_test_conn_close_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data)
-{
-    user_conn_t *user_conn = (user_conn_t *)user_data;
-    int ret = 0;
-    if (user_conn) {
-        ret = client_test_release_user_conn(user_conn); 
-    } 
-    return 0;
-}
-
-
-
-void
-client_test_conn_handshake_finished(xqc_connection_t *conn, void *user_data, void *conn_proto_data)
-{
-    user_conn_t *user_conn = (user_conn_t *) user_data;
-    xqc_stream_t *crypto_stream = conn->crypto_stream[XQC_ENC_LEV_HSK];
-
-    client_ctx_t *p_ctx = user_conn->ctx;
-    if (user_conn) {
-        client_test_handshake_finished(user_conn);
-    }
-
-}
-
-
-void
-client_test_conn_ping_acked_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *ping_user_data, void *user_data, void *conn_proto_data)
-{
-    return;
-}
-
-
-
-int
-client_test_stream_write_notify(xqc_stream_t *stream, void *user_data)
+test_trans_stream_write_notify(xqc_stream_t *stream, void *user_data)
 {
     user_stream_t *user_stream = (user_stream_t *) user_data;
     user_conn_t *user_conn = user_stream->user_conn;
@@ -167,34 +100,6 @@ client_test_stream_write_notify(xqc_stream_t *stream, void *user_data)
 
     return 0;
 }
-
-int
-client_test_stream_read_notify(xqc_stream_t *stream, void *user_data)
-{
-    return 0;
-}
-
-int
-client_test_stream_close_notify(xqc_stream_t *stream, void *user_data)
-{
-    return 0;
-} 
-
-
-int
-test_trans_conn_create_notify(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data)
-{
-    user_conn_t *user_conn = (user_conn_t *)user_data;
-    xqc_conn_set_alp_user_data(conn, user_conn);
-
-    user_conn->quic_conn = conn;
-
-    printf("xqc_conn_is_ready_to_send_early_data:%d\n", xqc_conn_is_ready_to_send_early_data(conn));
-    return 0;
-}
-
-
-
 
 static void
 test_trans_create_conn_callback(int fd, short what, void *arg)
@@ -208,15 +113,15 @@ test_trans_create_conn_callback(int fd, short what, void *arg)
     /* register transport callbacks */
     xqc_app_proto_callbacks_t ap_cbs = {
         .conn_cbs = {
-            .conn_create_notify = test_trans_conn_create_notify,
-            .conn_close_notify = client_test_conn_close_notify,
-            .conn_handshake_finished = client_test_conn_handshake_finished,
-            .conn_ping_acked = client_test_conn_ping_acked_notify,
+            .conn_create_notify = client_conn_create_notify_default,
+            .conn_close_notify = client_conn_close_notify_default,
+            .conn_handshake_finished = client_conn_handshake_finished_notify_default,
+            .conn_ping_acked = client_conn_ping_acked_notify_null,
         },
         .stream_cbs = {
-            .stream_write_notify = client_test_stream_write_notify,
-            .stream_read_notify = client_test_stream_read_notify,
-            .stream_close_notify = client_test_stream_close_notify,
+            .stream_write_notify = test_trans_stream_write_notify,
+            .stream_read_notify = client_stream_read_notify_null,
+            .stream_close_notify = client_stream_close_notify_null,
         }
     };
 
@@ -228,6 +133,7 @@ test_trans_create_conn_callback(int fd, short what, void *arg)
     conn_ssl_config.session_ticket_data = NULL;
     conn_ssl_config.transport_parameter_data = NULL;
 
+    g_conn_timeout = 3600; /* 连接超时时间设置为一个小时 */
     if (g_conn_count < g_max_conn_num) {
         event_add(ctx->ev_conc, &tv);
         user_conn_t *user_conn = client_create_user_conn_and_event(ctx, g_server_addr, g_server_port, g_transport);
@@ -258,8 +164,8 @@ test_trans_create_conn_callback(int fd, short what, void *arg)
         user_conn->ev_req = event_new(ctx->eb, -1, 0, test_trans_create_stream_callback, user_conn); 
         
         struct timeval tv;
-        tv.tv_sec = g_req_intval/1000;
-        tv.tv_usec = (g_req_intval%1000)*1000;
+        tv.tv_sec = g_req_intval / 1000;
+        tv.tv_usec = (g_req_intval % 1000) * 1000;
         event_add(user_conn->ev_req, &tv); 
     }
     return;

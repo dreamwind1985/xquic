@@ -34,6 +34,7 @@ int     g_req_per_time = 1;
 int     g_req_intval = 1000; /* 单位毫秒 */
 int     g_transport = 0;
 int     g_conn_timeout = 120;
+int     g_conn_count = 0;
 xqc_conn_settings_t *g_conn_settings = NULL;
 user_stats_t g_user_stats;
 char g_session_ticket_data[8192]={0};
@@ -304,7 +305,7 @@ client_fill_stream_http_header(xqc_http_headers_t *http_header)
 }
 
 int 
-client_initial_global_var()
+client_initial_global_var(void)
 {
      memset(&g_user_stats, 0, sizeof(user_stats_t));
 
@@ -349,7 +350,7 @@ client_initial_global_var()
 }
 
 int
-client_fork_multi_process()
+client_fork_multi_process(void)
 {
     int i = 0;
 
@@ -374,7 +375,7 @@ client_fork_multi_process()
 }
 
 client_ctx_t *
-client_create_and_initial_ctx()
+client_create_and_initial_ctx(void)
 {
     client_ctx_t * ctx = malloc(sizeof(client_ctx_t));
     if (ctx == NULL) {
@@ -544,9 +545,9 @@ client_conn_update_cid_notify(xqc_connection_t *conn, const xqc_cid_t *retire_ci
     user_conn_t *user_conn = (user_conn_t *) user_data;
     memcpy(&user_conn->cid, new_cid, sizeof(*new_cid));
     //if (g_debug_flag) {
-        client_ctx_t *ctx = user_conn->ctx;
-        printf("====>SCID:%s\n", xqc_scid_str(new_cid));
-        printf("====>DCID:%s\n", xqc_dcid_str_by_scid(ctx->engine, new_cid));
+    client_ctx_t *ctx = user_conn->ctx;
+    printf("====>SCID:%s\n", xqc_scid_str(new_cid));
+    printf("====>DCID:%s\n", xqc_dcid_str_by_scid(ctx->engine, new_cid));
     //}
 }
 
@@ -572,8 +573,6 @@ client_init_addr(user_conn_t *user_conn,
         user_conn->local_addrlen = sizeof(struct sockaddr_in);
     }
 }
-
-
 
 int 
 client_create_socket(int type, 
@@ -772,7 +771,6 @@ client_timeout_callback(int fd, short what, void *arg)
     printf("xqc_conn_close, %d connetion rest\n", ctx->cur_conn_num);
 }
 
-
 int
 client_close_conn_proactive(user_conn_t *user_conn)
 {
@@ -792,6 +790,100 @@ client_close_conn_proactive(user_conn_t *user_conn)
     return 0;
 }
 
+int
+client_stream_read_notify_null(xqc_stream_t *stream, void *user_data)
+{
+    (void *)stream;
+    (void *)user_data;
+    return 0;
+}
+
+int
+client_stream_close_notify_null(xqc_stream_t *stream, void *user_data)
+{
+    (void *)stream;
+    (void *)user_data;
+    return 0;
+} 
+
+void
+client_conn_ping_acked_notify_null(xqc_connection_t *conn, const xqc_cid_t *cid, void *ping_user_data, void *user_data, void *conn_proto_data)
+{
+    (void *)conn;
+    (void *)cid;
+    (void *)ping_user_data;
+    (void *)user_data;
+    (void *)conn_proto_data;
+    return;
+}
+
+int
+client_conn_create_notify_default(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data)
+{
+    user_conn_t *user_conn = (user_conn_t *)user_data;
+    xqc_conn_set_alp_user_data(conn, user_conn);
+
+    user_conn->quic_conn = conn;
+
+    printf("xqc_conn_is_ready_to_send_early_data:%d\n", xqc_conn_is_ready_to_send_early_data(conn));
+    return 0;
+}
+
+int 
+client_handshake_finished(user_conn_t *user_conn)
+{
+    int ret = 0;
+    //printf("connection handshake finished\n");
+    if (g_stream_num_per_conn == 0) {
+        ret = client_close_conn_proactive(user_conn);
+        if (ret != 0) {
+            printf("error close connection\n"); 
+        }
+    }
+    return ret;
+}
+
+void
+client_conn_handshake_finished_notify_default(xqc_connection_t *conn, void *user_data, void *conn_proto_data)
+{
+    user_conn_t *user_conn = (user_conn_t *) user_data;
+
+    client_ctx_t *p_ctx = user_conn->ctx;
+    if (user_conn) {
+        client_handshake_finished(user_conn);
+    }
+}
+
+int
+client_release_user_conn(user_conn_t *user_conn)
+{
+    if (user_conn->ev_socket) {
+        event_del(user_conn->ev_socket);
+        if (user_conn->fd != -1) {
+            close(user_conn->fd);
+        }
+        user_conn->fd = -1;
+    } 
+    g_user_stats.conc_conn_count--;
+
+    client_ctx_t * p_ctx = user_conn->ctx;
+    p_ctx->cur_conn_num--;
+    if (p_ctx->cur_conn_num == 0 && g_conn_count >= g_max_conn_num) {
+        event_base_loopbreak(p_ctx->eb);
+    }
+    return 0;
+}
+   
+int
+client_conn_close_notify_default(xqc_connection_t *conn, const xqc_cid_t *cid, void *user_data, void *conn_proto_data)
+{
+    user_conn_t *user_conn = (user_conn_t *)user_data;
+    int ret = 0;
+    if (user_conn) {
+        ret = client_release_user_conn(user_conn); 
+    } 
+    return 0;
+}
 
 int
 client_print_stats(void)
