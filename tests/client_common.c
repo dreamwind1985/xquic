@@ -322,13 +322,10 @@ client_initial_global_var(void)
         g_token_len = 0;
     }
 
-    xqc_cong_ctrl_callback_t cong_ctrl;
-    cong_ctrl = xqc_bbr_cb;
-
     xqc_conn_settings_t conn_settings = {
         .pacing_on  =   0,
         .ping_on    =   0,
-        .cong_ctrl_callback = cong_ctrl,
+        .cong_ctrl_callback = xqc_bbr_cb,
         .cc_params  =   {
             .customize_on = 1, 
             .init_cwnd = 32, 
@@ -344,8 +341,9 @@ client_initial_global_var(void)
         .mp_ping_on = 0,
     };
     conn_settings.proto_version = XQC_VERSION_V1;
-    g_conn_settings = &conn_settings;
-    
+
+    g_conn_settings = (xqc_conn_settings_t *)xqc_calloc(1, sizeof(xqc_conn_settings_t));
+    xqc_memcpy(g_conn_settings, &conn_settings, sizeof(xqc_conn_settings_t));
     return XQC_OK;
 }
 
@@ -402,6 +400,15 @@ client_create_user_stream(xqc_engine_t * engine, user_conn_t *user_conn, xqc_cid
         if (user_stream->h3_request == NULL) {
             return NULL;
         }
+        client_fill_stream_http_header(&user_stream->http_header);
+    } else if (user_conn->h3 == 2) {
+        user_stream->h3_ext_bs = xqc_h3_ext_bytestream_create(engine, cid, user_stream);
+        if (user_stream->h3_ext_bs == NULL) {
+            printf("xqc_h3_ext_bytestream_create error\n");
+            return NULL;
+        }
+        //xqc_client_bytestream_send(user_stream->h3_ext_bs, user_stream);
+
     } else {
         user_stream->stream = xqc_stream_create(engine, cid, user_stream);
         if (user_stream->stream == NULL) {
@@ -412,7 +419,6 @@ client_create_user_stream(xqc_engine_t * engine, user_conn_t *user_conn, xqc_cid
     g_user_stats.conc_stream_count++;
     g_user_stats.total_stream_count++;
 
-    client_fill_stream_http_header(&user_stream->http_header);
     return user_stream;
 }
 
