@@ -3,6 +3,8 @@
 
 android_archs=(armeabi-v7a arm64-v8a)
 ios_archs=(armv7 arm64 x86_64)
+hmos_archs=(arm64-v8a)
+CMAKE_CMD="cmake"
 cur_dir=$(cd "$(dirname "$0")";pwd)
 
 cp -f $cur_dir/cmake/CMakeLists.txt  $cur_dir/CMakeLists.txt
@@ -14,24 +16,28 @@ artifact_dir=$3
 # boringssl is used as default
 ssl_type="boringssl"
 ssl_path=$4
-ssl_lib_path="${ssl_path}/"
 
-if [ -z "$ssl_path" ] || [ -z "$ssl_lib_path" ] ; then
-    echo "ssl environment not specified"
+# if ssl_path is not defined, try to use the default path
+if [ -z "$ssl_path" ] ; then
+    ssl_path="`pwd`/third_party/boringssl"
+    echo "use default ssl path: $ssl_path"
+fi
+
+if [ ! -d "$ssl_path" ] ; then
+    echo "ssl environment not exists"
     exit 0
 fi
 
-create_dir_or_exit() {
+create_dir_force() {
     if [ x"$2" == x ] ; then
         echo "$1 MUST NOT be empty"
         exit 1
     fi
     if [ -d $2 ] ; then
-        echo "directory already exists"
-    else
-        mkdir $2
-        echo "create $1 directory($2) suc"
+        rm -rf $2
     fi
+    mkdir $2
+    echo "create $1 directory($2) suc"
 }
 
 platform=$(echo $platform | tr A-Z a-z )
@@ -45,21 +51,26 @@ if [ x"$platform" == xios ] ; then
     archs=${ios_archs[@]} 
     configures="-DSSL_TYPE=${ssl_type}
                 -DSSL_PATH=${ssl_path}
-                -DSSL_LIB_PATH=${ssl_lib_path}
+                -DBORINGSSL_PREFIX=bs
+                -DBORINGSSL_PREFIX_SYMBOLS=$cur_dir/bssl_symbols.txt
                 -DDEPLOYMENT_TARGET=10.0
                 -DCMAKE_BUILD_TYPE=Minsizerel
                 -DXQC_ENABLE_TESTING=OFF
                 -DXQC_BUILD_SAMPLE=OFF
                 -DGCOV=OFF
                 -DCMAKE_TOOLCHAIN_FILE=${IOS_CMAKE_TOOLCHAIN}
-                -DENABLE_BITCODE=0
-                -DXQC_NO_SHARED=1
-                -DXQC_COMPAT_GENERATE_SR_PKT=1
-                -DXQC_ENABLE_RENO=0
-                -DXQC_ENABLE_BBR2=0
-                -DXQC_ENABLE_COPA=0
-                -DXQC_ENABLE_UNLIMITED=0
-                -DXQC_ENABLE_MP_INTEROP=0"
+                -DENABLE_BITCODE=OFF
+                -DXQC_NO_SHARED=ON
+				-DXQC_ENABLE_TH3=ON
+                -DXQC_COMPAT_GENERATE_SR_PKT=ON
+                -DXQC_ENABLE_RENO=OFF
+                -DXQC_ENABLE_BBR2=ON
+                -DXQC_ENABLE_COPA=OFF
+                -DXQC_ENABLE_UNLIMITED=OFF
+                -DXQC_ENABLE_MP_INTEROP=OFF
+                -DXQC_DISABLE_LOG=OFF
+                -DXQC_ONLY_ERROR_LOG=ON
+                -DXQC_COMPAT_GENERATE_SR_PKT=ON"
 
 elif [ x"$platform" == xandroid ] ; then
     if [ x"$ANDROID_NDK" == x ] ; then
@@ -70,7 +81,6 @@ elif [ x"$platform" == xandroid ] ; then
     archs=${android_archs[@]}
     configures="-DSSL_TYPE=${ssl_type}
                 -DSSL_PATH=${ssl_path}
-                -DSSL_LIB_PATH=${ssl_lib_path}
                 -DCMAKE_BUILD_TYPE=Minsizerel
                 -DXQC_ENABLE_TESTING=OFF
                 -DXQC_BUILD_SAMPLE=OFF
@@ -79,13 +89,45 @@ elif [ x"$platform" == xandroid ] ; then
                 -DANDROID_STL=c++_shared
                 -DANDROID_NATIVE_API_LEVEL=android-19
                 -DXQC_ENABLE_RENO=OFF
-                -DXQC_ENABLE_BBR2=OFF
+                -DXQC_ENABLE_BBR2=ON
                 -DXQC_ENABLE_COPA=OFF
                 -DXQC_ENABLE_UNLIMITED=OFF
                 -DXQC_ENABLE_MP_INTEROP=OFF
                 -DXQC_DISABLE_LOG=OFF
                 -DXQC_ONLY_ERROR_LOG=ON
+				-DXQC_ENABLE_TH3=ON
                 -DXQC_COMPAT_GENERATE_SR_PKT=ON"
+elif [ x"$platform" == xharmony ] ; then
+    if [ x"$HMOS_CMAKE_TOOLCHAIN" == x ] ; then
+        echo "HMOS_CMAKE_TOOLCHAIN MUST be defined"
+        exit 0
+    fi
+    echo "HMOS_CMAKE_TOOLCHAIN: ${HMOS_CMAKE_TOOLCHAIN}"
+
+    if [ x"$HMOS_CMAKE_PATH" == x ] ; then
+        echo "HMOS_CMAKE_PATH MUST be defined"
+        exit 0
+    fi
+    echo "HMOS_CMAKE_PATH: ${HMOS_CMAKE_PATH}"
+    CMAKE_CMD=${HMOS_CMAKE_PATH}
+
+    archs=${hmos_archs[@]}
+    configures="-DSSL_TYPE=${ssl_type}
+                -DSSL_PATH=${ssl_path}
+                -DCMAKE_BUILD_TYPE=Release
+                -DXQC_ENABLE_TESTING=OFF
+                -DXQC_BUILD_SAMPLE=OFF
+                -DGCOV=OFF
+                -DCMAKE_TOOLCHAIN_FILE=${HMOS_CMAKE_TOOLCHAIN}
+                -DXQC_ENABLE_RENO=OFF
+                -DXQC_ENABLE_BBR2=ON
+                -DXQC_ENABLE_COPA=OFF
+                -DXQC_ENABLE_UNLIMITED=OFF
+                -DXQC_ENABLE_MP_INTEROP=OFF
+                -DXQC_DISABLE_LOG=OFF
+                -DXQC_ONLY_ERROR_LOG=ON
+                -DXQC_COMPAT_GENERATE_SR_PKT=ON
+                -DDISABLE_WARNINGS=ON"
 else
     echo "no support platform"
     exit 0
@@ -101,17 +143,19 @@ generate_plat_spec() {
         elif [ x"$1" == xi386 ] ; then
             plat_spec="$plat_spec -DPLATFORM=SIMULATOR"
         fi
+    elif [ x"$platform" == xharmony ] ; then
+        plat_spec="-DOHOS_ARCH=$1"
     else
         plat_spec="-DANDROID_ABI=$1"
     fi
     echo $plat_spec
 }
 
-create_dir_or_exit build $build_dir
+create_dir_force build $build_dir
 # to absoulute path 
 build_dir=$cur_dir/$build_dir
 
-create_dir_or_exit artifact $artifact_dir
+create_dir_force artifact $artifact_dir
 artifact_dir=$cur_dir/$artifact_dir
 
 cd $build_dir 
@@ -127,7 +171,7 @@ do
     rm -rf third_party
 
     echo "compiling xquic on $i arch"
-    cmake  $configures  $(generate_plat_spec $i ) -DLIBRARY_OUTPUT_PATH=`pwd`/outputs/ ..
+    "${CMAKE_CMD}"  $configures  $(generate_plat_spec $i ) -DLIBRARY_OUTPUT_PATH=`pwd`/outputs/ ..
     make -j 4
     if [ $? != 0 ] ; then
         exit 0

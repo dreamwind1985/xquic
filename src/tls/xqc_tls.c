@@ -391,7 +391,10 @@ xqc_tls_process_trans_param(xqc_tls_t *tls)
 xqc_int_t
 xqc_tls_do_handshake(xqc_tls_t *tls)
 {
-    xqc_ssl_handshake_res_t res = xqc_ssl_do_handshake(tls->ssl);
+    xqc_ssl_handshake_res_t res = xqc_ssl_do_handshake(tls->ssl, tls->user_data, tls->log);
+
+    xqc_log(tls->log, XQC_LOG_DEBUG, "|TLS handshake|ret:%d|", res);
+
     if (res == XQC_SSL_HSK_RES_FAIL) {
         xqc_log(tls->log, XQC_LOG_ERROR, "|TLS handshake error:%s|",
                 ERR_error_string(ERR_get_error(), NULL));
@@ -555,6 +558,8 @@ xqc_tls_process_crypto_data(xqc_tls_t *tls, xqc_encrypt_level_t level,
     int ret;
     int err;
 
+    xqc_log(tls->log, XQC_LOG_DEBUG, "|xqc_tls_process_crypto_data|level:%d|%zu|", level, data_len);
+
     if (SSL_provide_quic_data(ssl, (enum ssl_encryption_level_t)level, crypto_data, data_len)
         != XQC_SSL_SUCCESS)
     {
@@ -686,12 +691,16 @@ xqc_tls_is_key_ready(xqc_tls_t *tls, xqc_encrypt_level_t level, xqc_key_type_t k
 }
 
 uint32_t
-xqc_tls_get_cipher_id(SSL *ssl, xqc_encrypt_level_t level, xqc_bool_t no_crypto)
+xqc_tls_get_cipher_id(SSL *ssl, const SSL_CIPHER *cipher, xqc_encrypt_level_t level, xqc_bool_t no_crypto)
 {
     if (no_crypto == XQC_TRUE
         && (level == XQC_ENC_LEV_0RTT || level == XQC_ENC_LEV_1RTT))
     {
         return NID_undef;
+    }
+
+    if (cipher != NULL) {
+        return SSL_CIPHER_get_id(cipher);
     }
 
     return SSL_CIPHER_get_id(SSL_get_current_cipher(ssl));
@@ -857,8 +866,8 @@ xqc_ssl_alpn_select_cb(SSL *ssl, const unsigned char **out, unsigned char *outle
     if (XQC_OK != ret) {
         return SSL_TLSEXT_ERR_ALERT_FATAL;
     }
-
-    xqc_log(tls->log, XQC_LOG_DEBUG, "|select alpn|%*s|", alpn_len, alpn);
+    xqc_log_event(tls->log, TRA_ALPN_INFORMATION, alpn_list, alpn_list_len, in,
+        inlen, alpn, alpn_len);
     return SSL_TLSEXT_ERR_OK;
 }
 
@@ -1063,7 +1072,7 @@ xqc_ssl_cert_cb(SSL *ssl, void *arg)
 
     hostname = SSL_get_servername(ssl, TLSEXT_NAMETYPE_host_name);
     if (NULL == hostname) {
-        xqc_log(tls->log, XQC_LOG_ERROR, "hostname is NULL");
+        xqc_log(tls->log, XQC_LOG_ERROR, "|hostname is NULL");
         return XQC_SSL_FAIL;
     }
 
@@ -1154,7 +1163,7 @@ xqc_tls_set_read_secret(SSL *ssl, enum ssl_encryption_level_t level,
     /* create crypto instance if not created */
     if (NULL == tls->crypto[level]) {
         tls->crypto[level] = xqc_crypto_create(
-            xqc_tls_get_cipher_id(ssl, (xqc_encrypt_level_t)level, tls->no_crypto), tls->log);
+            xqc_tls_get_cipher_id(ssl, cipher, (xqc_encrypt_level_t)level, tls->no_crypto), tls->log);
         if (NULL == tls->crypto[level]) {
             xqc_log(tls->log, XQC_LOG_ERROR, "|create crypto error");
             return XQC_SSL_FAIL;
@@ -1197,7 +1206,7 @@ xqc_tls_set_write_secret(SSL *ssl, enum ssl_encryption_level_t level,
     /* create crypto instance if not created */
     if (NULL == tls->crypto[level]) {
         tls->crypto[level] = xqc_crypto_create(
-            xqc_tls_get_cipher_id(ssl, (xqc_encrypt_level_t)level, tls->no_crypto), tls->log);
+            xqc_tls_get_cipher_id(ssl, cipher, (xqc_encrypt_level_t)level, tls->no_crypto), tls->log);
         if (NULL == tls->crypto[level]) {
             xqc_log(tls->log, XQC_LOG_ERROR, "|create crypto error");
             return XQC_SSL_FAIL;

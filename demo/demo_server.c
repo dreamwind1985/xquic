@@ -7,19 +7,32 @@
 #include <errno.h>
 #include <memory.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <fcntl.h>
-#include <sys/wait.h>
 #include <event2/event.h>
+#include <signal.h>
 #include <inttypes.h>
 #include <xquic/xquic_typedef.h>
 #include <xquic/xquic.h>
 #include <xquic/xqc_http3.h>
 #include <ctype.h>
-#include <signal.h>
+#include "../tests/platform.h"
+
+#ifndef XQC_SYS_WINDOWS
+#include <unistd.h>
+#include <sys/wait.h>
+#else
+#include "../tests/getopt.h"
+#pragma comment(lib,"ws2_32.lib")
+#pragma comment(lib,"event.lib")
+#pragma comment(lib, "Iphlpapi.lib")
+#pragma comment(lib, "Bcrypt.lib")
+#pragma comment(lib, "crypt32")
+#endif
+
 
 #include "common.h"
 #include "xqc_hq.h"
+
 
 
 
@@ -87,12 +100,25 @@ typedef struct xqc_demo_svr_quic_config_s {
     /* multipath */
     int  multipath;
 
+    /* multipath version */
+    int  multipath_version;
+    
+    int  max_initial_paths;
+    /* support interop test */
+    int is_interop_mode;
+
     /* ack on any path */
     int  mp_ack_on_any_path;
 
     /* scheduler */
     char mp_sched[32];
 
+    uint32_t reinjection;
+
+    uint64_t keyupdate_pkt_threshold;
+    uint64_t least_available_cid_count;
+
+    size_t max_pkt_sz;
 } xqc_demo_svr_quic_config_t;
 
 
@@ -272,15 +298,33 @@ xqc_demo_svr_write_log_file(xqc_log_level_t lvl, const void *buf, size_t size, v
 
     int write_len = write(ctx->log_fd, buf, size);
     if (write_len < 0) {
-        printf("write log failed, errno: %d\n", errno);
+        printf("write log failed, errno: %d\n", get_sys_errno());
         return;
     }
     write_len = write(ctx->log_fd, line_break, 1);
     if (write_len < 0) {
-        printf("write log failed, errno: %d\n", errno);
+        printf("write log failed, errno: %d\n", get_sys_errno());
     }
 }
 
+void
+xqc_demo_svr_write_qlog_file(qlog_event_importance_t imp, const void *buf, size_t size, void *eng_user_data)
+{
+    xqc_demo_svr_ctx_t *ctx = (xqc_demo_svr_ctx_t*)eng_user_data;
+    if (ctx->log_fd <= 0) {
+        return;
+    }
+
+    int write_len = write(ctx->log_fd, buf, size);
+    if (write_len < 0) {
+        printf("write qlog failed, errno: %d\n", get_sys_errno());
+        return;
+    }
+    write_len = write(ctx->log_fd, line_break, 1);
+    if (write_len < 0) {
+        printf("write qlog failed, errno: %d\n", get_sys_errno());
+    }
+}
 
 /**
  * start of server keylog functions
@@ -319,12 +363,12 @@ xqc_demo_svr_keylog_cb(const xqc_cid_t *scid, const char *line, void *eng_user_d
 
     int write_len = write(ctx->keylog_fd, line, strlen(line));
     if (write_len < 0) {
-        printf("write keys failed, errno: %d\n", errno);
+        printf("write keys failed, errno: %d\n", get_sys_errno());
         return;
     }
     write_len = write(ctx->keylog_fd, line_break, 1);
     if (write_len < 0) {
-        printf("write keys failed, errno: %d\n", errno);
+        printf("write keys failed, errno: %d\n", get_sys_errno());
     }
 }
 
@@ -354,8 +398,8 @@ void
 xqc_demo_svr_conn_update_cid_notify(xqc_connection_t *conn, const xqc_cid_t *retire_cid,
     const xqc_cid_t *new_cid, void *user_data)
 {
-    xqc_demo_svr_user_conn_t *user_conn = (xqc_demo_svr_user_conn_t *)user_data;
-    memcpy(&user_conn->cid, new_cid, sizeof(*new_cid));
+    // xqc_demo_svr_user_conn_t *user_conn = (xqc_demo_svr_user_conn_t *)user_data;
+    // memcpy(&user_conn->cid, new_cid, sizeof(*new_cid));
 }
 
 /******************************************************************************
@@ -539,7 +583,11 @@ xqc_demo_svr_handle_hq_request(xqc_demo_svr_user_stream_t *user_stream, xqc_hq_r
         }
         /* get total len */
         fseek(user_stream->res.fp, 0, SEEK_END);
+#ifdef XQC_SYS_WINDOWS
+        user_stream->res.total_len = ftell(user_stream->res.fp);
+#else
         user_stream->res.total_len = ftello(user_stream->res.fp);
+#endif
         fseek(user_stream->res.fp, 0, SEEK_SET);
 
     } else {
@@ -697,6 +745,9 @@ int
 xqc_demo_svr_h3_request_close_notify(xqc_h3_request_t *h3_request, void *strm_user_data)
 {
     DEBUG;
+    xqc_request_stats_t stats = xqc_h3_request_get_stats(h3_request);
+    printf("cwnd_blocked:%"PRIu64"\n", stats.cwnd_blocked_ms);
+
     xqc_demo_svr_user_stream_t *user_stream = (xqc_demo_svr_user_stream_t*)strm_user_data;
     xqc_demo_svr_close_user_stream_resource(user_stream);
     free(user_stream);
@@ -730,7 +781,6 @@ xqc_demo_svr_request_send_body(xqc_demo_svr_user_stream_t *user_stream, char *da
     if (ret == -XQC_EAGAIN) {
         ret = 0;
     }
-
     return ret;
 }
 
@@ -832,7 +882,11 @@ xqc_demo_svr_handle_h3_request(xqc_demo_svr_user_stream_t *user_stream,
         }
         /* get total len */
         fseek(user_stream->res.fp, 0, SEEK_END);
+#ifdef XQC_SYS_WINDOWS
+        user_stream->res.total_len = ftell(user_stream->res.fp);
+#else
         user_stream->res.total_len = ftello(user_stream->res.fp);
+#endif
         fseek(user_stream->res.fp, 0, SEEK_SET);
 
     } else {
@@ -969,15 +1023,16 @@ xqc_demo_svr_write_socket(const unsigned char *buf, size_t size, const struct so
     int fd = svr_ctx.current_fd;
 
     do {
-        errno = 0;
+        set_sys_errno(0);
         res = sendto(fd, buf, size, 0, peer_addr, peer_addrlen);
         if (res < 0) {
-            printf("xqc_demo_svr_write_socket err %zd %s, fd: %d\n", res, strerror(errno), fd);
-            if (errno == EAGAIN) {
+            printf("xqc_demo_svr_write_socket err %zd %s, fd: %d\n", 
+                res, strerror(get_sys_errno()), fd);
+            if (get_sys_errno() == EAGAIN) {
                 res = XQC_SOCKET_EAGAIN;
             }
         }
-    } while ((res < 0) && (errno == EINTR));
+    } while ((res < 0) && (get_sys_errno() == EINTR));
 
     return res;
 }
@@ -1010,17 +1065,17 @@ xqc_demo_svr_socket_read_handler(xqc_demo_svr_ctx_t *ctx, int fd)
     do {
         recv_size = recvfrom(fd, packet_buf, sizeof(packet_buf), 0,
                              (struct sockaddr *) &peer_addr, &peer_addrlen);
-        if (recv_size < 0 && errno == EAGAIN) {
+        if (recv_size < 0 && get_sys_errno() == EAGAIN) {
             break;
         }
 
         if (recv_size < 0) {
-            printf("!!!!!!!!!recvfrom: recvmsg = %zd err=%s\n", recv_size, strerror(errno));
+            printf("!!!!!!!!!recvfrom: recvmsg = %zd err=%s\n", recv_size, strerror(get_sys_errno()));
             break;
         }
         recv_sum += recv_size;
 
-        uint64_t recv_time = xqc_demo_now();
+        uint64_t recv_time = xqc_now();
         xqc_int_t ret = xqc_engine_packet_process(ctx->engine, packet_buf, recv_size,
                                       (struct sockaddr *)(&ctx->local_addr), ctx->local_addrlen,
                                       (struct sockaddr *)(&peer_addr), peer_addrlen,
@@ -1061,39 +1116,47 @@ xqc_demo_svr_init_socket(int family, uint16_t port,
 {
     int size;
     int opt_reuseaddr;
+    int flags = 1;
     int fd = socket(family, SOCK_DGRAM, 0);
     if (fd < 0) {
-        printf("create socket failed, errno: %d\n", errno);
+        printf("create socket failed, errno: %d\n", get_sys_errno());
         return -1;
     }
 
     /* non-block */
+#ifdef XQC_SYS_WINDOWS
+    if (ioctlsocket(fd, FIONBIO, &flags) == SOCKET_ERROR) {
+		goto err;
+	}
+#else
     if (fcntl(fd, F_SETFL, O_NONBLOCK) == -1) {
-        printf("set socket nonblock failed, errno: %d\n", errno);
+        printf("set socket nonblock failed, errno: %d\n", get_sys_errno());
         goto err;
     }
+#endif
 
     /* reuse port */
     opt_reuseaddr = 1;
     if (setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt_reuseaddr, sizeof(opt_reuseaddr)) < 0) {
-        printf("setsockopt failed, errno: %d\n", errno);
+        printf("setsockopt failed, errno: %d\n", get_sys_errno());
         goto err;
     }
 
     /* send/recv buffer size */
     size = 1 * 1024 * 1024;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVBUF, &size, sizeof(int)) < 0) {
-        printf("setsockopt failed, errno: %d\n", errno);
+        printf("setsockopt failed, errno: %d\n", get_sys_errno());
         goto err;
     }
     if (setsockopt(fd, SOL_SOCKET, SO_SNDBUF, &size, sizeof(int)) < 0) {
-        printf("setsockopt failed, errno: %d\n", errno);
+        printf("setsockopt failed, errno: %d\n", get_sys_errno());
         goto err;
     }
 
     /* bind port */
     if (bind(fd, local_addr, local_addrlen) < 0) {
-        printf("bind socket failed, family: %d, errno: %d, %s\n", family, errno, strerror(errno));
+        printf("bind socket failed, family: %d, errno: %d, %s\n", family, 
+            get_sys_errno(), strerror(get_sys_errno()));
         goto err;
     }
 
@@ -1157,7 +1220,7 @@ xqc_demo_svr_usage(int argc, char *argv[])
             "\n"
             "Options:\n"
             "   -p    Server port.\n"
-            "   -c    Congestion Control Algorithm. r:reno b:bbr c:cubic\n"
+            "   -c    Congestion Control Algorithm. r:reno b:bbr c:cubic P:copa \n"
             "   -C    Pacing on.\n"
             "   -l    Log level. e:error d:debug.\n"
             "   -L    xquic log directory.\n"
@@ -1165,9 +1228,13 @@ xqc_demo_svr_usage(int argc, char *argv[])
             "   -k    Key output file path\n"
             "   -r    retry\n"
             "   -d    do not read responses from files\n"
+            "   -i    use interop mode\n"
             "   -M    enable MPQUIC.\n"
             "   -P    enable MPQUIC to return ACK_MPs on any paths.\n"
-            "   -s    multipath scheduler (interop, minrtt), default: interop\n"
+            "   -s    multipath scheduler (interop, minrtt, backup), default: interop\n"
+            "   -R    Reinjection (1,2,4) \n"
+            "   -u    Keyupdate packet threshold\n"
+            "   -F    MTU size (default: 1200)\n"
             , prog);
 }
 
@@ -1203,13 +1270,17 @@ xqc_demo_svr_init_args(xqc_demo_svr_args_t *args)
     strncpy(args->env_cfg.key_out_path, KEY_PATH, PATH_LEN - 1);
     strncpy(args->env_cfg.priv_key_path, PRIV_KEY_PATH, PATH_LEN - 1);
     strncpy(args->env_cfg.cert_pem_path, CERT_PEM_PATH, PATH_LEN - 1);
+
+    args->quic_cfg.keyupdate_pkt_threshold = UINT64_MAX;
+    args->quic_cfg.least_available_cid_count = 1;
+    args->quic_cfg.max_pkt_sz = 1200;
 }
 
 void
 xqc_demo_svr_parse_args(int argc, char *argv[], xqc_demo_svr_args_t *args)
 {
     int ch = 0;
-    while ((ch = getopt(argc, argv, "p:c:CD:l:L:6k:rdMPs:")) != -1) {
+    while ((ch = getopt(argc, argv, "p:c:CD:l:L:6k:rdMiPs:R:u:a:F:f:")) != -1) {
         switch (ch) {
         /* listen port */
         case 'p':
@@ -1220,7 +1291,7 @@ xqc_demo_svr_parse_args(int argc, char *argv[], xqc_demo_svr_args_t *args)
         /* congestion control */
         case 'c':
             printf("option cong_ctl :%s\n", optarg);
-            /* r:reno b:bbr c:cubic */
+            /* r:reno b:bbr c:cubic P:copa */
             switch (*optarg) {
             case 'b':
                 args->net_cfg.cc = CC_TYPE_BBR;
@@ -1230,6 +1301,9 @@ xqc_demo_svr_parse_args(int argc, char *argv[], xqc_demo_svr_args_t *args)
                 break;
             case 'r':
                 args->net_cfg.cc = CC_TYPE_RENO;
+                break;
+            case 'P':
+                args->net_cfg.cc = CC_TYPE_COPA;
                 break;
             default:
                 break;
@@ -1284,11 +1358,16 @@ xqc_demo_svr_parse_args(int argc, char *argv[], xqc_demo_svr_args_t *args)
             args->quic_cfg.dummy_mode = 1;
             break;
 
+        case 'i':
+            printf("set interop mode\n");
+            args->quic_cfg.is_interop_mode = 1;
+            break;
+
         case 'M':
             printf("option multipath enabled\n");
             args->quic_cfg.multipath = 1;
             break;
-        
+
         case 'P':
             printf("option ACK_MP on any path enabled\n");
             args->quic_cfg.mp_ack_on_any_path = 1;
@@ -1297,6 +1376,31 @@ xqc_demo_svr_parse_args(int argc, char *argv[], xqc_demo_svr_args_t *args)
         case 's':
             printf("option scheduler: %s\n", optarg);
             strncpy(args->quic_cfg.mp_sched, optarg, 32);
+            break;
+
+        case 'R':
+            printf("option reinjection: %s\n", optarg);
+            args->quic_cfg.reinjection = atoi(optarg);
+            break;
+
+        case 'u': /* key update packet threshold */
+            printf("key update packet threshold: %s\n", optarg);
+            args->quic_cfg.keyupdate_pkt_threshold = atoi(optarg);
+            break;
+
+        case 'a': /* key update packet threshold */
+            printf("least Available cid counts: %s\n", optarg);
+            args->quic_cfg.least_available_cid_count = atoi(optarg);
+            break;
+
+        case 'F':
+            printf("MTU size: %s\n", optarg);
+            args->quic_cfg.max_pkt_sz = atoi(optarg);
+            break;
+
+        case 'f':
+            printf("option init_max_path_id: %s\n", optarg);
+            args->quic_cfg.max_initial_paths = atoi(optarg);
             break;
 
         default:
@@ -1315,7 +1419,8 @@ xqc_demo_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
         .set_event_timer = xqc_demo_svr_set_event_timer,
         .log_callbacks = {
             .xqc_log_write_err = xqc_demo_svr_write_log_file,
-            .xqc_log_write_stat = xqc_demo_svr_write_log_file
+            .xqc_log_write_stat = xqc_demo_svr_write_log_file,
+            .xqc_qlog_event_write = xqc_demo_svr_write_qlog_file
         },
         .keylog_cb = xqc_demo_svr_keylog_cb,
     };
@@ -1363,7 +1468,7 @@ xqc_demo_svr_init_ssl_config(xqc_engine_ssl_config_t *cfg, xqc_demo_svr_args_t *
 }
 
 void
-xqc_demo_svr_init_conn_settings(xqc_demo_svr_args_t *args)
+xqc_demo_svr_init_conn_settings(xqc_engine_t *engine, xqc_demo_svr_args_t *args)
 {
     xqc_cong_ctrl_callback_t ccc = {0};
     switch (args->net_cfg.cc) {
@@ -1373,6 +1478,11 @@ xqc_demo_svr_init_conn_settings(xqc_demo_svr_args_t *args)
     case CC_TYPE_CUBIC:
         ccc = xqc_cubic_cb;
         break;
+#ifdef XQC_ENABLE_COPA
+    case CC_TYPE_COPA:
+        ccc = xqc_copa_cb;
+        break;
+#endif
 #ifdef XQC_ENABLE_RENO
     case CC_TYPE_RENO:
         ccc = xqc_reno_cb;
@@ -1382,9 +1492,12 @@ xqc_demo_svr_init_conn_settings(xqc_demo_svr_args_t *args)
         break;
     }
 
-    xqc_scheduler_callback_t sched;
+    xqc_scheduler_callback_t sched = {0};
     if (strncmp(args->quic_cfg.mp_sched, "minrtt", strlen("minrtt")) == 0) {
         sched = xqc_minrtt_scheduler_cb;
+
+    } if (strncmp(args->quic_cfg.mp_sched, "backup", strlen("backup")) == 0) {
+        sched = xqc_backup_scheduler_cb;
 
     } else {
 #ifdef XQC_ENABLE_MP_INTEROP
@@ -1399,15 +1512,25 @@ xqc_demo_svr_init_conn_settings(xqc_demo_svr_args_t *args)
         .cc_params = {
             .customize_on = 1,
             .init_cwnd = 32,
+            .bbr_enable_lt_bw = 1,
         },
         .spurious_loss_detect_on = 1,
         .init_idle_time_out = 60000,
         .enable_multipath = args->quic_cfg.multipath,
+        .init_max_path_id = args->quic_cfg.max_initial_paths,
         .mp_ack_on_any_path = args->quic_cfg.mp_ack_on_any_path,
         .scheduler_callback = sched,
+        .reinj_ctl_callback = xqc_deadline_reinj_ctl_cb,
+        .mp_enable_reinjection = args->quic_cfg.reinjection,
+        .standby_path_probe_timeout = 1000,
+        .keyupdate_pkt_threshold = args->quic_cfg.keyupdate_pkt_threshold,
+        .least_available_cid_count = args->quic_cfg.least_available_cid_count,
+        .is_interop_mode = args->quic_cfg.is_interop_mode,
+        .max_pkt_out_size = args->quic_cfg.max_pkt_sz,
+        .adaptive_ack_frequency = 1,
     };
 
-    xqc_server_set_conn_settings(&conn_settings);
+    xqc_server_set_conn_settings(engine, &conn_settings);
 }
 
 
@@ -1474,9 +1597,6 @@ xqc_demo_svr_init_xquic_engine(xqc_demo_svr_ctx_t *ctx, xqc_demo_svr_args_t *arg
     xqc_transport_callbacks_t transport_cbs;
     xqc_demo_svr_init_callback(&callback, &transport_cbs, args);
 
-    /* init server connection settings */
-    xqc_demo_svr_init_conn_settings(args);
-
     /* init engine config */
     xqc_config_t config;
     if (xqc_engine_get_default_config(&config, XQC_ENGINE_CLIENT) < 0) {
@@ -1510,6 +1630,9 @@ xqc_demo_svr_init_xquic_engine(xqc_demo_svr_ctx_t *ctx, xqc_demo_svr_args_t *arg
         printf("xqc_engine_create error\n");
         return -1;
     }
+
+    /* init server connection settings */
+    xqc_demo_svr_init_conn_settings(ctx->engine, args);
 
     if (xqc_demo_svr_init_alpn_ctx(ctx) < 0) {
         printf("init alpn ctx error!");
@@ -1559,6 +1682,9 @@ th3_demo_proxy_sig_hndlr(int signo)
 int
 main(int argc, char *argv[])
 {
+    /* init env if necessary */
+    xqc_platform_init_env();
+
     signal(SIGTERM, th3_demo_proxy_sig_hndlr);
 
     /* get input server args */

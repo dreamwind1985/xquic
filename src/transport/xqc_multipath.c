@@ -9,7 +9,6 @@
 #include "src/transport/xqc_cid.h"
 #include "src/transport/xqc_stream.h"
 #include "src/transport/xqc_utils.h"
-#include "src/transport/xqc_wakeup_pq.h"
 #include "src/transport/xqc_packet_out.h"
 #include "src/transport/xqc_reinjection.h"
 #include "src/transport/xqc_frame_parser.h"
@@ -72,9 +71,15 @@ xqc_path_destroy(xqc_path_ctx_t *path)
 }
 
 xqc_path_ctx_t *
-xqc_path_create(xqc_connection_t *conn, xqc_cid_t *scid, xqc_cid_t *dcid)
+xqc_path_create(xqc_connection_t *conn, xqc_cid_t *scid, xqc_cid_t *dcid, uint64_t path_id)
 {
     xqc_path_ctx_t *path = NULL;
+
+    if (conn->create_path_count >= XQC_MAX_PATHS_COUNT) {
+        xqc_log(conn->log, XQC_LOG_ERROR, 
+                "|too many paths|current maximum:%d|", XQC_MAX_PATHS_COUNT);
+        return NULL;
+    }
 
     path = xqc_calloc(1, sizeof(xqc_path_ctx_t));
     if (path == NULL) {
@@ -84,11 +89,10 @@ xqc_path_create(xqc_connection_t *conn, xqc_cid_t *scid, xqc_cid_t *dcid)
 
     path->path_state = XQC_PATH_STATE_INIT;
     path->parent_conn = conn;
-
-    path->tra_path_status = XQC_TRA_PATH_STATUS_IN_USE;
     path->app_path_status = XQC_APP_PATH_STATUS_AVAILABLE;
     path->app_path_status_send_seq_num = 0;
     path->app_path_status_recv_seq_num = 0;
+    path->path_id = path_id;
 
     path->path_pn_ctl = xqc_pn_ctl_create(conn);
     if (path->path_pn_ctl == NULL) {
@@ -106,18 +110,17 @@ xqc_path_create(xqc_connection_t *conn, xqc_cid_t *scid, xqc_cid_t *dcid)
     xqc_init_list_head(&path->path_reinj_tmp_buf);
 
     /* cid & path_id init */
-
     if (scid == NULL) {
-        if (xqc_get_unused_cid(&conn->scid_set.cid_set, &path->path_scid) != XQC_OK) {
+        if (xqc_get_unused_cid(&conn->scid_set, &path->path_scid, path_id) != XQC_OK) {
             xqc_log(conn->log, XQC_LOG_ERROR, "|conn don't have available scid|");
             goto err;
         }
 
     } else {
         /* already have scid */
-        xqc_cid_inner_t *inner_cid = xqc_cid_in_cid_set(&conn->scid_set.cid_set, scid);
+        xqc_cid_inner_t *inner_cid = xqc_cid_in_cid_set(&conn->scid_set, scid, path_id);
         if (inner_cid == NULL) {
-            xqc_log(conn->log, XQC_LOG_DEBUG, "|invalid scid:%s|", xqc_scid_str(scid));
+            xqc_log(conn->log, XQC_LOG_DEBUG, "|invalid scid:%s|", xqc_scid_str(conn->engine, scid));
             goto err;
         }
 
@@ -125,17 +128,20 @@ xqc_path_create(xqc_connection_t *conn, xqc_cid_t *scid, xqc_cid_t *dcid)
     }
 
     if (dcid == NULL) {
-        if (xqc_get_unused_cid(&(conn->dcid_set.cid_set), &(path->path_dcid)) != XQC_OK) {
+        if (xqc_get_unused_cid(&conn->dcid_set, &(path->path_dcid), path_id) != XQC_OK) {
             xqc_log(conn->log, XQC_LOG_ERROR, "|MP|conn don't have available dcid|");
             goto err;
         }
 
     } else {
+        //TODO: risky code
         /* already have dcid */
         xqc_cid_copy(&(path->path_dcid), dcid);
     }
 
-    path->path_id = path->path_scid.cid_seq_num;
+    xqc_cid_set_update_state(&conn->dcid_set, path_id, XQC_CID_SET_USED);
+    xqc_cid_set_update_state(&conn->scid_set, path_id, XQC_CID_SET_USED);
+
     path->path_create_time = xqc_monotonic_timestamp();
     path->curr_pkt_out_size = conn->pkt_out_size;
     path->path_max_pkt_out_size = conn->max_pkt_out_size;
@@ -145,7 +151,7 @@ xqc_path_create(xqc_connection_t *conn, xqc_cid_t *scid, xqc_cid_t *dcid)
     conn->create_path_count++;
 
     xqc_log(conn->engine->log, XQC_LOG_DEBUG, "|path:%ui|dcid:%s|scid:%s|create_path_count:%ud|",
-            path->path_id, xqc_dcid_str(&path->path_dcid), xqc_scid_str(&path->path_scid), conn->create_path_count);
+            path->path_id, xqc_dcid_str(conn->engine, &path->path_dcid), xqc_scid_str(conn->engine, &path->path_scid), conn->create_path_count);
 
     return path;
 
@@ -192,7 +198,7 @@ xqc_path_init(xqc_path_ctx_t *path, xqc_connection_t *conn)
         }
 
         /* write path challenge frame & send immediately */
-        ret = xqc_write_path_challenge_frame_to_packet(conn, path);
+        ret = xqc_write_path_challenge_frame_to_packet(conn, path, path->app_path_status == XQC_APP_PATH_STATUS_STANDBY);
         if (ret != XQC_OK) {
             xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_write_path_challenge_frame_to_packet error|%d|", ret);
             return ret;
@@ -207,7 +213,9 @@ xqc_path_init(xqc_path_ctx_t *path, xqc_connection_t *conn)
             xqc_path_addr_str(path), path->peer_addrlen);
 
     xqc_log(conn->engine->log, XQC_LOG_DEBUG, "|path:%ui|dcid:%s|scid:%s|state:%d|",
-            path->path_id, xqc_dcid_str(&path->path_dcid), xqc_scid_str(&path->path_scid), path->path_state);
+            path->path_id, xqc_dcid_str(conn->engine, &path->path_dcid), 
+            xqc_scid_str(conn->engine, &path->path_scid), 
+            path->path_state);
 
     return XQC_OK;
 }
@@ -244,9 +252,10 @@ xqc_path_move_unack_packets_from_conn(xqc_path_ctx_t *path, xqc_connection_t *co
                 }
                 
                 if (XQC_NEED_REPAIR(po->po_frame_types) 
+                    || (po->po_flag & XQC_POF_NOTIFY)
                     || repair_dgram == XQC_DGRAM_RETX_ASKED_BY_APP) 
                 {
-                    xqc_send_queue_copy_to_lost(po, conn->conn_send_queue);
+                    xqc_send_queue_copy_to_lost(po, conn->conn_send_queue, XQC_FALSE);
 
                 } else {
                     /* for datagram, we should remove all copies in the unacked list */
@@ -276,17 +285,9 @@ xqc_set_path_state(xqc_path_ctx_t *path, xqc_path_state_t dst_state)
 
     if (path->path_state == XQC_PATH_STATE_ACTIVE) {
         conn->active_path_count--;
-        
-        if (path->tra_path_status == XQC_TRA_PATH_STATUS_IN_USE) {
-            conn->in_use_active_path_count--;
-        }
 
     } else if (dst_state == XQC_PATH_STATE_ACTIVE) {
         conn->active_path_count++;
-
-        if (path->tra_path_status == XQC_TRA_PATH_STATUS_IN_USE) {
-            conn->in_use_active_path_count++;
-        }
     }
 
     path->path_state = dst_state;
@@ -328,6 +329,9 @@ xqc_path_immediate_close(xqc_path_ctx_t *path)
         xqc_timer_set(&path->path_send_ctl->path_timer_manager, XQC_TIMER_PATH_DRAINING, now, 3 * pto);
     }
 
+    xqc_cid_set_update_state(&conn->scid_set, path->path_id, XQC_CID_SET_ABANDONED);
+    xqc_cid_set_update_state(&conn->dcid_set, path->path_id, XQC_CID_SET_ABANDONED);
+
     return XQC_OK;
 }
 
@@ -353,7 +357,7 @@ xqc_path_closed(xqc_path_ctx_t *path)
                                                 xqc_conn_get_user_data(conn));
     }
 
-    /* TODO: releadse path recource */
+    /* TODO: release path recource */
     return XQC_OK;
 }
 
@@ -365,31 +369,66 @@ xqc_path_closed(xqc_path_ctx_t *path)
 xqc_multipath_mode_t
 xqc_conn_enable_multipath(xqc_connection_t *conn)
 {
+    xqc_log(conn->log, XQC_LOG_DEBUG, "|xqc_conn_enable_multipath|%d|%d|",
+            conn->local_settings.enable_multipath, conn->remote_settings.enable_multipath);
+
     if ((conn->local_settings.enable_multipath == 1)
         && (conn->remote_settings.enable_multipath == 1))
     {
         if (conn->dcid_set.current_dcid.cid_len == 0
             || conn->scid_set.user_scid.cid_len == 0) 
         {
-            xqc_log(conn->log, XQC_LOG_ERROR, 
-                    "|mutlipath is not possible for connections"
-                    " with zero-length DCID|");
-            XQC_CONN_ERR(conn, TRA_TRANSPORT_PARAMETER_ERROR);
-            return XQC_CONN_NOT_SUPPORT_MULTIPATH;
+            xqc_log(conn->log, XQC_LOG_ERROR, "|zero-length DCID|");
+            XQC_CONN_ERR(conn, TRA_MP_PROTOCOL_VIOLATION);
+            return XQC_CONN_MP_DISABLED;
         }
-        return XQC_CONN_MULTIPATH_MULTIPLE_PNS;
+
+        xqc_log(conn->log, XQC_LOG_DEBUG, "|1RTT_transport_params|max_path_id:local:%ui|max_path_id:remote:%ui|",
+                conn->local_settings.init_max_path_id, conn->remote_settings.init_max_path_id);
+        conn->local_max_path_id = conn->local_settings.init_max_path_id;
+        conn->remote_max_path_id = conn->remote_settings.init_max_path_id;
+        conn->curr_max_path_id = xqc_min(conn->local_max_path_id, conn->remote_max_path_id);
+
+        return XQC_CONN_MP_ENABLED;
     }
-
-    return XQC_CONN_NOT_SUPPORT_MULTIPATH;
-
+    return XQC_CONN_MP_DISABLED;
 }
 
+xqc_multipath_version_t
+xqc_conn_multipath_version_negotiation(xqc_connection_t *conn)
+{
+    if (xqc_conn_is_current_mp_version_supported(conn->remote_settings.multipath_version) == XQC_OK &&
+        conn->local_settings.multipath_version == conn->remote_settings.multipath_version)
+    {
+        xqc_log(conn->log, XQC_LOG_DEBUG, 
+                        "|multipath version negotiation succeed on multipath 0%d|", conn->remote_settings.multipath_version);
+        return conn->remote_settings.multipath_version;
+    }
+    return XQC_ERR_MULTIPATH_VERSION;
+}
 
 xqc_int_t
-xqc_conn_create_path(xqc_engine_t *engine, const xqc_cid_t *scid, uint64_t *new_path_id)
+xqc_conn_is_current_mp_version_supported(xqc_multipath_version_t mp_version)
+{
+    xqc_int_t ret;
+    switch (mp_version) {
+    case XQC_MULTIPATH_10:
+        ret = XQC_OK;
+        break;
+    default:
+        ret = -XQC_EMP_INVALID_MP_VERTION;
+        break;
+    }
+    return ret;
+}
+
+xqc_int_t
+xqc_conn_create_path(xqc_engine_t *engine, const xqc_cid_t *scid, uint64_t *new_path_id, int path_status)
 {
     xqc_connection_t *conn = NULL;
     xqc_path_ctx_t *path = NULL;
+    xqc_app_path_status_t ps_inner = XQC_APP_PATH_STATUS_AVAILABLE;
+    uint64_t path_id = 0;
 
     conn = xqc_engine_conns_hash_find(engine, scid, 's');
     if (!conn) {
@@ -407,24 +446,30 @@ xqc_conn_create_path(xqc_engine_t *engine, const xqc_cid_t *scid, uint64_t *new_
         return -XQC_EMP_NOT_SUPPORT_MP;
     }
 
-    /* must have at least one available unused scid & dcid */
-    if (xqc_conn_check_unused_cids(conn) != XQC_OK) {
+    if (xqc_conn_get_available_path_id(conn, &path_id) != XQC_OK) {
+        conn->conn_flag |= XQC_CONN_FLAG_MP_WAIT_MP_READY;
         xqc_log(conn->log, XQC_LOG_WARN,
                 "|don't have available cid for new path|");
         return -XQC_EMP_NO_AVAIL_PATH_ID;
     }
 
-    path = xqc_conn_create_path_inner(conn, NULL, NULL);
+    xqc_log(conn->log, XQC_LOG_DEBUG,
+            "|find available path_id:%ui|", path_id);
+
+    if (path_status == XQC_APP_PATH_STATUS_STANDBY) {
+        ps_inner = XQC_APP_PATH_STATUS_STANDBY;
+    }
+
+    path = xqc_conn_create_path_inner(conn, NULL, NULL, ps_inner, path_id);
     if (path == NULL) {
-        xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_path_create error|");
+        xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_path_create error|%ui|", path_id);
         return -XQC_EMP_CREATE_PATH;
     }
 
-    if (!(conn->conn_flag & XQC_CONN_FLAG_TICKING)) {
-        if (0 == xqc_conns_pq_push(conn->engine->conns_active_pq, conn, conn->last_ticked_time)) {
-            conn->conn_flag |= XQC_CONN_FLAG_TICKING;
-        }
-    }
+    xqc_engine_remove_wakeup_queue(engine, conn);
+    xqc_engine_add_active_queue(engine, conn);
+
+    xqc_engine_wakeup_once(engine);
 
     *new_path_id = path->path_id;
 
@@ -476,13 +521,10 @@ xqc_conn_close_path(xqc_engine_t *engine, const xqc_cid_t *scid, uint64_t closed
         return ret;
     }
 
-    if (!(conn->conn_flag & XQC_CONN_FLAG_TICKING)) {
-        if (0 == xqc_conns_pq_push(conn->engine->conns_active_pq, conn, conn->last_ticked_time)) {
-            conn->conn_flag |= XQC_CONN_FLAG_TICKING;
-        }
-    }
+    xqc_engine_remove_wakeup_queue(engine, conn);
+    xqc_engine_add_active_queue(engine, conn);
 
-    xqc_engine_main_logic_internal(engine);
+    xqc_engine_conn_logic(engine, conn);
 
     return XQC_OK;
 }
@@ -494,7 +536,8 @@ xqc_conn_init_paths_list(xqc_connection_t *conn)
 
     conn->conn_initial_path = xqc_conn_create_path_inner(conn,
                                                          &conn->scid_set.user_scid,
-                                                         &conn->dcid_set.current_dcid);
+                                                         &conn->dcid_set.current_dcid,
+                                                         XQC_APP_PATH_STATUS_AVAILABLE, 0);
     if (conn->conn_initial_path == NULL) {
         xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_conn_create_path_inner fail|");
         return -XQC_EMP_CREATE_PATH;
@@ -516,24 +559,6 @@ xqc_conn_destroy_paths_list(xqc_connection_t *conn)
 }
 
 xqc_path_ctx_t *
-xqc_conn_find_path_by_dcid_seq(xqc_connection_t *conn, uint64_t dcid_seq_num)
-{
-    xqc_path_ctx_t *path = NULL;
-    xqc_list_head_t *pos, *next;
-
-    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
-        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-
-        if (path->path_dcid.cid_seq_num == dcid_seq_num) {
-            return path;
-        }
-    }
-
-    return NULL;
-}
-
-
-xqc_path_ctx_t *
 xqc_conn_find_path_by_path_id(xqc_connection_t *conn, uint64_t path_id)
 {
     xqc_path_ctx_t *path = NULL;
@@ -550,65 +575,50 @@ xqc_conn_find_path_by_path_id(xqc_connection_t *conn, uint64_t path_id)
     return NULL;
 }
 
+
 xqc_path_ctx_t *
 xqc_conn_find_path_by_scid(xqc_connection_t *conn, xqc_cid_t *scid)
 {
     xqc_path_ctx_t *path = NULL;
     xqc_list_head_t *pos, *next;
+    xqc_cid_inner_t *inner_cid = NULL;
 
-    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
-        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-
-        if (xqc_cid_is_equal(&path->path_scid, scid) == XQC_OK) {
-            return path;
-        }
+    inner_cid = xqc_cid_set_search_cid(&conn->scid_set, scid);
+    if (inner_cid != NULL) {
+        return xqc_conn_find_path_by_path_id(conn, inner_cid->cid.path_id);
     }
 
-    if (xqc_cid_is_equal(&conn->original_dcid, scid) == XQC_OK) {
+    if (conn->conn_type == XQC_CONN_TYPE_SERVER 
+        && xqc_cid_is_equal(&conn->original_dcid, scid) == XQC_OK) 
+    {
         return conn->conn_initial_path;
     }
 
     return NULL;
 }
 
-xqc_path_ctx_t *
-xqc_conn_find_path_by_dcid(xqc_connection_t *conn, xqc_cid_t *dcid)
-{
-    xqc_path_ctx_t *path = NULL;
-    xqc_list_head_t *pos, *next;
-
-    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
-        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-
-        if (xqc_cid_is_equal(&path->path_dcid, dcid) == XQC_OK) {
-            return path;
-        }
-    }
-
-    return NULL;
-}
-
-
 
 xqc_path_ctx_t *
 xqc_conn_create_path_inner(xqc_connection_t *conn,
-    xqc_cid_t *scid, xqc_cid_t *dcid)
+    xqc_cid_t *scid, xqc_cid_t *dcid, xqc_app_path_status_t path_status, uint64_t path_id)
 {
     xqc_int_t ret = XQC_ERROR;
     xqc_path_ctx_t *path = NULL;
 
-    path = xqc_path_create(conn, scid, dcid);
+    path = xqc_path_create(conn, scid, dcid, path_id);
     if (path == NULL) {
         xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_path_create error|");
         return NULL;
     }
+
+    path->app_path_status = path_status;
 
     ret = xqc_path_init(path, conn);
     if (ret != XQC_OK) {
         xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_path_init error|%d|", ret);
         return NULL;
     }
-
+    xqc_log_event(conn->log, CON_PATH_ASSIGNED, path, conn);
     return path;
 }
 
@@ -628,19 +638,24 @@ xqc_conn_path_metrics_print(xqc_connection_t *conn, xqc_conn_stats_t *stats)
 
     xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
         path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_state >= XQC_PATH_STATE_VALIDATING && paths_num < XQC_MAX_PATHS_COUNT) {
+        if (path->path_state >= XQC_PATH_STATE_ACTIVE && paths_num < XQC_MAX_PATHS_COUNT) {
 
             if (path == NULL || path->path_send_ctl == NULL) {
-                continue;
-            }
-
-            if (path->path_send_ctl->ctl_recv_count == 0) {
                 continue;
             }
 
             stats->paths_info[paths_num].path_id = path->path_id;
             stats->paths_info[paths_num].path_pkt_recv_count = path->path_send_ctl->ctl_recv_count;
             stats->paths_info[paths_num].path_pkt_send_count = path->path_send_ctl->ctl_send_count;
+            stats->paths_info[paths_num].path_send_bytes = path->path_send_ctl->ctl_app_bytes_send;
+            stats->paths_info[paths_num].path_recv_bytes = path->path_send_ctl->ctl_app_bytes_recv;
+            stats->paths_info[paths_num].path_app_status = path->app_path_status;
+
+            if (path->app_path_status == XQC_APP_PATH_STATUS_STANDBY) {
+                stats->standby_path_app_bytes += path->path_send_ctl->ctl_app_bytes_send + path->path_send_ctl->ctl_app_bytes_recv;
+            }
+
+            stats->total_app_bytes += path->path_send_ctl->ctl_app_bytes_send + path->path_send_ctl->ctl_app_bytes_recv;
 
             paths_num++;
         }
@@ -658,14 +673,6 @@ xqc_request_path_metrics_print(xqc_connection_t *conn, xqc_h3_stream_t *h3_strea
     stats->mp_standby_path_send_weight = 0.0;
     stats->mp_standby_path_recv_weight = 0.0;
 
-    if (!conn->enable_multipath) {
-        return;
-    }
-
-    if (conn->active_path_count < 2) {
-        return;
-    }
-
     int available_path_cnt = 0, standby_path_cnt = 0;
 
     uint64_t aggregate_send_bytes = 0, aggregate_recv_bytes = 0;
@@ -682,6 +689,9 @@ xqc_request_path_metrics_print(xqc_connection_t *conn, xqc_h3_stream_t *h3_strea
             uint64_t send_bytes = h3_stream->paths_info[path->path_id].path_send_bytes;
             uint64_t recv_bytes = h3_stream->paths_info[path->path_id].path_recv_bytes;
 
+            h3_stream->paths_info[path->path_id].path_srtt = path->path_send_ctl->ctl_srtt;
+            h3_stream->paths_info[path->path_id].path_app_status = path->app_path_status;
+
             if (send_bytes > 0 || recv_bytes > 0) {
                 aggregate_send_bytes += send_bytes;
                 aggregate_recv_bytes += recv_bytes;
@@ -697,24 +707,29 @@ xqc_request_path_metrics_print(xqc_connection_t *conn, xqc_h3_stream_t *h3_strea
         }
     }
 
-    if ((available_path_cnt > 0) && (standby_path_cnt > 0)) {
-        stats->mp_state = 1;
+    if (conn->enable_multipath && conn->active_path_count >= 2) {
+        if ((available_path_cnt > 0) && (standby_path_cnt > 0)) {
+            stats->mp_state = 1;
 
-    } else if ((available_path_cnt == 0) && (standby_path_cnt > 0)) {
-        stats->mp_state = 2;
+        } else if ((available_path_cnt == 0) && (standby_path_cnt > 0)) {
+            stats->mp_state = 2;
 
-    } else if ((available_path_cnt > 0) && (standby_path_cnt == 0)) {
-        stats->mp_state = 3;
+        } else if ((available_path_cnt > 0) && (standby_path_cnt == 0)) {
+            stats->mp_state = 3;
+        }
+
+    } else {
+        stats->mp_state = 0;
     }
 
     if (aggregate_send_bytes != 0) {
-        stats->mp_default_path_send_weight = (float)(h3_stream->paths_info[XQC_INITIAL_PATH_ID].path_send_bytes) / aggregate_send_bytes;
         stats->mp_standby_path_send_weight = (float)(standby_path_send_bytes) / aggregate_send_bytes;
+        stats->mp_default_path_send_weight = 1.0 - stats->mp_standby_path_send_weight;
     }
 
     if (aggregate_recv_bytes != 0) {
-        stats->mp_default_path_recv_weight = (float)(h3_stream->paths_info[XQC_INITIAL_PATH_ID].path_recv_bytes) / aggregate_recv_bytes;
         stats->mp_standby_path_recv_weight = (float)(standby_path_recv_bytes) / aggregate_recv_bytes;
+        stats->mp_default_path_recv_weight = 1.0 - stats->mp_standby_path_recv_weight;
     }
 }
 
@@ -726,7 +741,7 @@ xqc_stream_path_metrics_print(xqc_connection_t *conn, xqc_stream_t *stream, char
 
     if (!conn->enable_multipath) {
         snprintf(buff, buff_size, "mp is not supported in connection scid:%s", 
-                                  xqc_scid_str(&conn->scid_set.user_scid));
+                                  xqc_scid_str(conn->engine, &conn->scid_set.user_scid));
         return;
     }
 
@@ -783,17 +798,24 @@ void
 xqc_stream_path_metrics_on_send(xqc_connection_t *conn, xqc_packet_out_t *po)
 {
     for (int i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {
-        if (po->po_stream_frames[i].ps_is_used == 1) {
+        if (po->po_stream_frames[i].ps_is_used == 1 
+            && po->po_stream_frames[i].ps_is_reset == 0) 
+        {
             xqc_stream_t * stream = xqc_find_stream_by_id(po->po_stream_frames[i].ps_stream_id, conn->streams_hash);
 
             if (stream != NULL && po->po_path_id < XQC_MAX_PATHS_COUNT) {
                 stream->paths_info[po->po_path_id].path_id = po->po_path_id;
                 stream->paths_info[po->po_path_id].path_pkt_send_count += 1;
-                stream->paths_info[po->po_path_id].path_send_bytes += po->po_used_size;
+                stream->paths_info[po->po_path_id].path_send_bytes += po->po_stream_frames[i].ps_length;
 
                 if (po->po_flag & XQC_POF_REINJECTED_REPLICA) {
-                    stream->paths_info[po->po_path_id].path_send_reinject_bytes += po->po_used_size;
+                    stream->paths_info[po->po_path_id].path_send_reinject_bytes += po->po_stream_frames[i].ps_length;
                 }
+            }
+
+            conn->stream_stats.send_bytes += po->po_stream_frames[i].ps_length;
+            if (po->po_flag & XQC_POF_REINJECTED_REPLICA) {
+                conn->stream_stats.reinjected_bytes += po->po_stream_frames[i].ps_length;
             }
         }
     }
@@ -805,78 +827,6 @@ xqc_stream_path_metrics_on_recv(xqc_connection_t *conn, xqc_stream_t *stream, xq
     if (pi->pi_path_id < XQC_MAX_PATHS_COUNT) {
         stream->paths_info[pi->pi_path_id].path_id = pi->pi_path_id;
         stream->paths_info[pi->pi_path_id].path_pkt_recv_count += 1;
-    }
-}
-
-
-void
-xqc_path_metrics_print(xqc_connection_t *conn, char *buff, unsigned buff_size)
-{
-    xqc_list_head_t *pos, *next;
-    xqc_path_ctx_t  *path;
-
-    int cursor = 0;
-    int ret = 0;
-    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
-        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
-        if (path->path_state >= XQC_PATH_STATE_VALIDATING) {
-            if (cursor >= (buff_size - 100)) {  // enough space
-                break;
-            }
-
-            // TODO 关于数据抓取说明
-            ret = snprintf(buff + cursor, buff_size - cursor,
-                           "#%"PRIu64"-%d-%d-%"PRIu64"-%.4f-%"PRIu32"-%"PRIu32"-%"PRIu32"-%"PRIu32"-%"PRIu32""
-                           "-%"PRIu32"-%"PRIu32"-%"PRIu32"-%"PRIu64"-%"PRIu64"-%"PRIu32"-%"PRIu32"-%"PRIu32,
-                           path->path_id,
-                           path->path_state,
-                           path->app_path_status,
-                           xqc_send_ctl_get_srtt(path->path_send_ctl),
-                           xqc_send_ctl_get_retrans_rate(path->path_send_ctl),
-                           path->path_send_ctl->ctl_send_count,
-                           path->path_send_ctl->ctl_lost_count,
-                           path->path_send_ctl->ctl_tlp_count,
-                           path->path_send_ctl->ctl_spurious_loss_count,
-                           path->path_send_ctl->ctl_recv_count,
-                           path->path_send_ctl->ctl_update_latest_rtt_count,
-                           path->rebinding_count,
-                           path->rebinding_valid,
-                           path->path_send_ctl->ctl_bytes_send,
-                           path->path_send_ctl->ctl_bytes_recv,
-                           path->standby_probe_count,
-                           path->app_path_status_changed_count,
-                           path->tra_path_status_changed_count);
-
-            cursor += ret;
-        }
-    }
-}
-
-void
-xqc_h3s_path_metrics_print(xqc_h3_stream_t *h3_stream, char *buff, unsigned buff_size)
-{
-    int cursor = 0;
-    int ret = 0;
-
-    for (int i = 0; i < XQC_MAX_PATHS_COUNT; ++i) {
-
-        if (h3_stream->paths_info[i].path_id == XQC_MAX_UINT64_VALUE) {
-            continue;
-        }
-
-        if (cursor >= (buff_size - 100)) {  // enough space
-            break;
-        }
-
-        ret = snprintf(buff + cursor, buff_size - cursor,
-                        "#%"PRIu64"-%"PRIu64"-%"PRIu64"-%"PRIu64"-%"PRIu64,
-                        h3_stream->paths_info[i].path_id,
-                        h3_stream->paths_info[i].path_pkt_send_count,
-                        h3_stream->paths_info[i].path_pkt_recv_count,
-                        h3_stream->paths_info[i].path_send_bytes,
-                        h3_stream->paths_info[i].path_send_reinject_bytes);
-
-        cursor += ret;
     }
 }
 
@@ -936,7 +886,7 @@ xqc_path_send_buffer_clear(xqc_connection_t *conn, xqc_path_ctx_t *path, xqc_lis
             if (packet_out->po_flag & XQC_POF_TLP) {
                 xqc_send_queue_move_to_head(&packet_out->po_list, &send_queue->sndq_pto_probe_packets);
 
-            } else if (packet_out->po_flag & XQC_POF_RETRANSED) {
+            } else if (packet_out->po_flag & XQC_POF_LOST) {
                 xqc_send_queue_move_to_head(&packet_out->po_list, &send_queue->sndq_lost_packets);
 
             } else {
@@ -1033,6 +983,7 @@ xqc_conn_server_init_path_addr(xqc_connection_t *conn, uint64_t path_id,
         ret = xqc_memcpy_with_cap(path->local_addr, sizeof(path->local_addr), local_addr, local_addrlen);
         if (ret == XQC_OK) {
             path->local_addrlen = local_addrlen;
+            path->addr_str_len = 0;
 
         } else {
             xqc_log(conn->log, XQC_LOG_ERROR, 
@@ -1046,6 +997,7 @@ xqc_conn_server_init_path_addr(xqc_connection_t *conn, uint64_t path_id,
         ret = xqc_memcpy_with_cap(path->peer_addr, sizeof(path->peer_addr), peer_addr, peer_addrlen);
         if (ret == XQC_OK) {
             path->peer_addrlen = peer_addrlen;
+            path->addr_str_len = 0;
 
         } else {
             xqc_log(conn->log, XQC_LOG_ERROR, 
@@ -1067,10 +1019,11 @@ xqc_conn_server_init_path_addr(xqc_connection_t *conn, uint64_t path_id,
             /* check if ip address is same with sub-connections created */
             if (xqc_is_same_addr(peer_addr, (struct sockaddr *)active_path->peer_addr)) {
                 xqc_path_immediate_close(path);
-                xqc_log(conn->engine->log, XQC_LOG_STATS, "|MP|path:%ui|conn:%s|cannot activate this path, due to the same IP|curIP:%s|conflictIP:%s|",
+                xqc_log(conn->engine->log, XQC_LOG_STATS, "|MP|path:%ui|conn:%s|"
+                        "cannot activate this path, due to the same IP|curIP:%s|conflictIP:%s|",
                         path_id, xqc_conn_addr_str(conn),
-                        xqc_peer_addr_str((struct sockaddr*)peer_addr, conn->peer_addrlen),
-                        xqc_local_addr_str((struct sockaddr*)active_path->peer_addr, active_path->peer_addrlen));
+                        xqc_peer_addr_str(conn->engine, (struct sockaddr*)peer_addr, conn->peer_addrlen),
+                        xqc_local_addr_str(conn->engine, (struct sockaddr*)active_path->peer_addr, active_path->peer_addrlen));
                 return XQC_OK;
             }
         }
@@ -1139,7 +1092,7 @@ xqc_path_validate(xqc_path_ctx_t *path)
             path->path_flag &= ~XQC_PATH_FLAG_SEND_STATUS;
             xqc_int_t ret = xqc_set_application_path_status(path, path->next_app_path_state, XQC_TRUE);
             if (ret != XQC_OK) {
-                xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_write_path_status_frame_to_packet error|");
+                xqc_log(conn->log, XQC_LOG_ERROR, "|error|");
             }
         }
 
@@ -1219,7 +1172,6 @@ xqc_path_record_info(xqc_path_ctx_t *path, xqc_path_info_t *path_info)
     path_info->path_id = path->path_id;
     path_info->path_state = (uint8_t)path->path_state;
     path_info->app_path_status = (uint8_t)path->app_path_status;
-    path_info->tra_path_status = (uint8_t)path->tra_path_status;
     path_info->path_bytes_send = path->path_send_ctl->ctl_bytes_send;
     path_info->path_bytes_recv = path->path_send_ctl->ctl_bytes_recv;
 
@@ -1230,7 +1182,6 @@ xqc_path_record_info(xqc_path_ctx_t *path, xqc_path_info_t *path_info)
 
     path_info->standby_probe_count = path->standby_probe_count;
     path_info->app_path_status_changed_count = path->app_path_status_changed_count;
-    path_info->tra_path_status_changed_count = path->tra_path_status_changed_count;
 
     path_info->pkt_recv_cnt = path->path_send_ctl->ctl_recv_count;
     path_info->pkt_send_cnt = path->path_send_ctl->ctl_send_count;
@@ -1265,17 +1216,20 @@ xqc_set_application_path_status(xqc_path_ctx_t *path, xqc_app_path_status_t stat
         path->app_path_status = status;
 
         if (is_tx) {
-            xqc_int_t ret = xqc_write_path_status_frame_to_packet(conn, path);
+            xqc_int_t ret = XQC_ERROR;
+
+            ret = xqc_write_path_status_frame_to_packet(conn, path);
+
             if (ret != XQC_OK) {
                 path->app_path_status = last_status;
-                xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_write_path_status_frame_to_packet error|%d|", ret);
+                xqc_log(conn->log, XQC_LOG_ERROR, "|error|%d|", ret);
                 return ret;
             }
         }
+
         xqc_log(conn->log, XQC_LOG_DEBUG, "|path:%ui|app_path_status:%d->%d|", path->path_id, last_status, status);
         path->app_path_status_changed_count++;
         path->last_app_path_status_changed_time = xqc_monotonic_timestamp();
-        xqc_set_transport_path_status(path, (xqc_tra_path_status_t)status, path->last_app_path_status_changed_time);
 
         if (status == XQC_APP_PATH_STATUS_FROZEN) {
             xqc_path_move_unack_packets_from_conn(path, conn);
@@ -1288,49 +1242,13 @@ xqc_set_application_path_status(xqc_path_ctx_t *path, xqc_app_path_status_t stat
     return XQC_OK;
 }
 
-void xqc_set_transport_path_status(xqc_path_ctx_t *path, xqc_tra_path_status_t status, xqc_usec_t now)
-{
-    if (path->tra_path_status == status
-        || status <= XQC_TRA_PATH_STATUS_NONE
-        || status >= XQC_TRA_PATH_STATUS_MAX) 
-    {
-        return;
-    }
-
-    xqc_connection_t *conn = path->parent_conn;
-
-    if (path->path_state == XQC_PATH_STATE_ACTIVE) {
-
-        if ((path->tra_path_status == XQC_TRA_PATH_STATUS_IN_USE)
-            && (status != XQC_TRA_PATH_STATUS_IN_USE))
-        {
-            conn->in_use_active_path_count--;
-
-        } else if ((path->tra_path_status != XQC_TRA_PATH_STATUS_IN_USE)
-                   && (status == XQC_TRA_PATH_STATUS_IN_USE))
-        {
-            conn->in_use_active_path_count++;
-        }
-
-    }
-
-    xqc_log(conn->log, XQC_LOG_DEBUG, "|path:%ui|tra_path_status:%d->%d|", path->path_id, path->tra_path_status, status);
-    path->tra_path_status = status;
-
-    path->tra_path_status_changed_count++;
-    path->last_tra_path_status_changed_time = now;
-
-    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
-    send_ctl->ctl_pto_count_since_last_tra_path_status_changed = 0;
-    send_ctl->ctl_send_count_at_last_tra_path_status_changed_time = send_ctl->ctl_send_count;
-}
 
 
 xqc_int_t
 xqc_conn_mark_path_standby(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t path_id)
 {
-    xqc_connection_t *conn = NULL;
     xqc_path_ctx_t *path = NULL;
+    xqc_connection_t *conn = NULL;
 
     conn = xqc_engine_conns_hash_find(engine, cid, 's');
     if (!conn) {
@@ -1471,35 +1389,102 @@ xqc_path_standby_probe(xqc_path_ctx_t *path)
         return ret;
     }
 
+    xqc_log(conn->log, XQC_LOG_DEBUG, "|PING|path:%ui|", path->path_id);
     path->standby_probe_count++;
     return XQC_OK;
 }
 
-xqc_path_stats_t
-xqc_path_get_stats(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t path_id)
+xqc_path_perf_class_t 
+xqc_path_get_perf_class(xqc_path_ctx_t *path)
 {
-    xqc_connection_t *conn;
+    xqc_connection_t *conn = path->parent_conn;
+    xqc_scheduler_params_t *param = &conn->conn_settings.scheduler_params;
+    xqc_usec_t path_srtt = xqc_send_ctl_get_srtt(path->path_send_ctl);
+    xqc_usec_t min_srtt = xqc_conn_get_min_srtt(path->parent_conn, 0);
+    uint64_t path_bw = xqc_send_ctl_get_est_bw(path->path_send_ctl);
+    double loss_rate = xqc_path_recent_loss_rate(path);
+
+    xqc_log(conn->log, XQC_LOG_DEBUG, "|conn:%p|path_id:%ui|"
+            "path_srtt:%ui|min_srtt:%ui|path_bw:%ui|loss_rate:%.2f|"
+            "path_pto:%ud|", 
+            conn, path->path_id, path_srtt, min_srtt, path_bw, loss_rate,
+            path->path_send_ctl->ctl_pto_count);
+
+    // low 
+    if (path_srtt > param->rtt_us_thr_high
+        || path->path_send_ctl->ctl_pto_count >= param->pto_cnt_thr
+        || loss_rate > param->loss_percent_thr_high) 
+    {
+        if (path->app_path_status == XQC_APP_PATH_STATUS_AVAILABLE) {
+            return XQC_PATH_CLASS_AVAILABLE_LOW;
+
+        } else {
+            return XQC_PATH_CLASS_STANDBY_LOW;
+        }
+    }
+
+    // mid 
+    if ((path_srtt <= param->rtt_us_thr_high && (path_srtt > xqc_min(param->rtt_us_thr_low, 3 * min_srtt)))
+        || path_bw < param->bw_Bps_thr
+        || (loss_rate <= param->loss_percent_thr_high && loss_rate > param->loss_percent_thr_low))
+    {
+        if (path->app_path_status == XQC_APP_PATH_STATUS_AVAILABLE) {
+            return XQC_PATH_CLASS_AVAILABLE_MID;
+
+        } else {
+            return XQC_PATH_CLASS_STANDBY_MID;
+        }
+    }
+
+    // high
+    if (path->app_path_status == XQC_APP_PATH_STATUS_AVAILABLE) {
+        return XQC_PATH_CLASS_AVAILABLE_HIGH;
+    }
+
+    return XQC_PATH_CLASS_STANDBY_HIGH;
+}
+
+double
+xqc_conn_recent_loss_rate(xqc_connection_t *conn)
+{
+    double loss_rate0 = 0, loss_rate1 = 0;
+    unsigned lost_cnt0, lost_cnt1, send_cnt0, send_cnt1;
     xqc_path_ctx_t *path;
-    xqc_path_stats_t path_stats;
-    xqc_memzero(&path_stats, sizeof(path_stats));
-    conn = xqc_engine_conns_hash_find(engine, cid, 's');
-    if (!conn) {
-        xqc_log(engine->log, XQC_LOG_ERROR, "|can not find connection|");
-        return path_stats;
+    xqc_list_head_t *pos, *next;
+
+    lost_cnt0 = lost_cnt1 = send_cnt0 = send_cnt1 = 0;
+
+    xqc_list_for_each_safe(pos, next, &conn->conn_paths_list) {
+        path = xqc_list_entry(pos, xqc_path_ctx_t, path_list);
+        lost_cnt0 += path->path_send_ctl->ctl_recent_lost_count[0];
+        send_cnt0 += path->path_send_ctl->ctl_recent_send_count[0];
+        lost_cnt1 += path->path_send_ctl->ctl_recent_lost_count[1];
+        send_cnt1 += path->path_send_ctl->ctl_recent_send_count[1];
     }
-    if (conn->conn_state >= XQC_CONN_STATE_CLOSING) {
-        return path_stats;
+
+    if (send_cnt0) {
+        loss_rate0 = 100.0 * lost_cnt0 / send_cnt0;
     }
-    path = xqc_conn_find_path_by_path_id(conn, path_id);
-    if (path == NULL) {
-        xqc_log(engine->log, XQC_LOG_WARN, "|path is not found by path_id in connection|");
-        return path_stats;
+
+    if (send_cnt1) {
+        loss_rate1 = 100.0 * lost_cnt1 / send_cnt1;
     }
-    xqc_send_ctl_t *send_ctl = path->path_send_ctl;
-    path_stats.last_tra_path_status_changed_time = path->last_tra_path_status_changed_time;
-    path_stats.send_count_since_last_tra_path_status_changed =
-        send_ctl->ctl_send_count - send_ctl->ctl_send_count_at_last_tra_path_status_changed_time;
-    path_stats.pto_count_since_last_tra_path_status_changed = send_ctl->ctl_pto_count_since_last_tra_path_status_changed;
-    path_stats.get_stats_success = 1;
-    return path_stats;
+
+    return xqc_max(loss_rate0, loss_rate1);
+}
+
+double 
+xqc_path_recent_loss_rate(xqc_path_ctx_t *path)
+{
+    double loss_rate0 = 0, loss_rate1 = 0;
+    
+    if (path->path_send_ctl->ctl_recent_send_count[0]) {
+        loss_rate0 = 100.0 * path->path_send_ctl->ctl_recent_lost_count[0] / path->path_send_ctl->ctl_recent_send_count[0];
+    }
+
+    if (path->path_send_ctl->ctl_recent_send_count[1]) {
+        loss_rate1 = 100.0 * path->path_send_ctl->ctl_recent_lost_count[1] / path->path_send_ctl->ctl_recent_send_count[1];
+    }
+
+    return xqc_max(loss_rate0, loss_rate1);
 }

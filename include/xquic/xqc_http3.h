@@ -17,20 +17,22 @@ extern "C" {
  * @brief read flag of xqc_h3_request_read_notify_pt
  */
 typedef enum {
-    /* nothing readable */
+    /** nothing readable */
     XQC_REQ_NOTIFY_READ_NULL            = 0,
 
-    /* read header section flag, this will be set when the first HEADERS is processed */
+    /** read header section flag, this will be set when the first HEADERS is processed */
     XQC_REQ_NOTIFY_READ_HEADER          = 1 << 0,
 
-    /* read body flag, this will be set when a DATA frame is processed */
+    /** read body flag, this will be set when a DATA frame is processed */
     XQC_REQ_NOTIFY_READ_BODY            = 1 << 1,
 
-    /* read trailer section flag, this will be set when trailer HEADERS frame is processed */
+    /** read trailer section flag, this will be set when trailer HEADERS frame is processed */
     XQC_REQ_NOTIFY_READ_TRAILER         = 1 << 2,
 
-    /* read empty fin flag, notify callback will be triggered when a single fin frame is received
-       while HEADERS and DATA were notified. This flag will NEVER be set with other flags */
+    /** 
+     * read empty fin flag, notify callback will be triggered when a single fin frame is received
+       while HEADERS and DATA were notified. This flag will NEVER be set with other flags 
+     */
     XQC_REQ_NOTIFY_READ_EMPTY_FIN       = 1 << 3,
 } xqc_request_notify_flag_t;
 
@@ -88,33 +90,33 @@ typedef enum xqc_http3_nv_flag_s {
 
 
 typedef struct xqc_http_header_s {
-    /* name of http header */
+    /** name of http header */
     struct iovec        name;
 
-    /* value of http header */
+    /** value of http header */
     struct iovec        value;
 
-    /* flags of xqc_http3_nv_flag_t with OR operator */
+    /** flags of xqc_http3_nv_flag_t with OR operator */
     uint8_t             flags;
 } xqc_http_header_t;
 
 
 typedef struct xqc_http_headers_s {
-    /* array of http headers */
+    /** array of http headers */
     xqc_http_header_t      *headers;
 
-    /* count of headers */
+    /** count of headers */
     size_t                  count;
 
-    /* capacity of headers */
+    /** capacity of headers */
     size_t                  capacity;
 
-    /* total byte count of headers */
+    /** total byte count of headers */
     size_t                  total_len;
 } xqc_http_headers_t;
 
 
-#define XQC_STREAM_INFO_LEN 400
+#define XQC_STREAM_INFO_LEN 128
 
 /**
  * @brief request statistics structure
@@ -122,17 +124,32 @@ typedef struct xqc_http_headers_s {
 typedef struct xqc_request_stats_s {
     size_t      send_body_size;
     size_t      recv_body_size;
-    size_t      send_header_size;       /* compressed header size */
-    size_t      recv_header_size;       /* compressed header size */
-    int         stream_err;             /* QUIC layer error code, 0 for no error */
-    xqc_usec_t  blocked_time;           /* time of h3 stream being blocked */
-    xqc_usec_t  unblocked_time;         /* time of h3 stream being unblocked */
-    xqc_usec_t  stream_fin_time;        /* time of receiving transport fin */
-    xqc_usec_t  h3r_begin_time;         /* time of creating request */
-    xqc_usec_t  h3r_end_time;           /* time of request fin */
-    xqc_usec_t  h3r_header_begin_time;  /* time of receiving HEADERS frame */
-    xqc_usec_t  h3r_header_end_time;    /* time of finishing processing HEADERS frame */
-    xqc_usec_t  h3r_body_begin_time;    /* time of receiving DATA frame */
+    /** plaintext header size */
+    size_t      send_header_size;
+    /** plaintext header size */
+    size_t      recv_header_size;
+    /** compressed header size */
+    size_t      send_hdr_compressed;
+    /** compressed header size */
+    size_t      recv_hdr_compressed;
+    /** QUIC layer error code, 0 for no error */
+    int         stream_err;
+    /** time of h3 stream being blocked */
+    xqc_usec_t  blocked_time;
+    /** time of h3 stream being unblocked */
+    xqc_usec_t  unblocked_time;
+    /** time of receiving transport fin */
+    xqc_usec_t  stream_fin_time;
+    /** time of creating request */ 
+    xqc_usec_t  h3r_begin_time;
+    /** time of request fin */
+    xqc_usec_t  h3r_end_time;
+    /** time of receiving HEADERS frame */
+    xqc_usec_t  h3r_header_begin_time;
+    /** time of finishing processing HEADERS frame */
+    xqc_usec_t  h3r_header_end_time;
+    /** time of receiving DATA frame */
+    xqc_usec_t  h3r_body_begin_time;
     xqc_usec_t  h3r_header_send_time;
     xqc_usec_t  h3r_body_send_time;
     xqc_usec_t  stream_fin_send_time;
@@ -152,7 +169,41 @@ typedef struct xqc_request_stats_s {
     float       mp_standby_path_send_weight;
     float       mp_standby_path_recv_weight;
 
+    uint64_t    rate_limit;
+
+    /**
+     * @brief 0RTT state
+     * 0: no 0RTT
+     * 1: 0RTT accept
+     * 2: 0RTT reject
+     */
+    uint8_t     early_data_state;
+
     char        stream_info[XQC_STREAM_INFO_LEN];
+
+    xqc_usec_t  stream_fst_fin_snd_time;
+    
+    /**
+     * @brief how long the request was blocked by congestion control (ms)
+     */
+    xqc_msec_t  cwnd_blocked_ms;
+    /**
+     * @brief the number of packet has been retransmitted
+     */
+    uint32_t    retrans_cnt;
+
+    xqc_usec_t  stream_fst_pkt_snd_time;
+    xqc_usec_t  stream_fst_pkt_rcv_time;
+    
+    uint32_t    sent_pkt_cnt;
+    uint8_t     max_pto_backoff;
+    
+    /**
+     * @brief the number of lost/delayed packets recovered by fec module;
+     */
+    uint32_t    fec_recov_cnt;
+
+    uint8_t     is_fec_protected;
 } xqc_request_stats_t;
 
 /**
@@ -173,25 +224,27 @@ typedef struct xqc_h3_ext_bytestream_stats_s {
     xqc_usec_t  first_byte_rcvd_time;
 } xqc_h3_ext_bytestream_stats_t;
 
-/* connection settings for http3 */
+/**
+ * @brief connection settings for http3 
+ */
 typedef struct xqc_h3_conn_settings_s {
-    /* MAX_FIELD_SECTION_SIZE of http3 */
+    /** MAX_FIELD_SECTION_SIZE of http3 */
     uint64_t max_field_section_size;
 
-    /* MAX_PUSH_STREAMS */
+    /** MAX_PUSH_STREAMS */
     uint64_t max_pushes;
 
-    /* ENC_MAX_DYNAMIC_TABLE_CAPACITY */
+    /** ENC_MAX_DYNAMIC_TABLE_CAPACITY */
     uint64_t qpack_enc_max_table_capacity;
 
-    /* DEC_MAX_DYNAMIC_TABLE_CAPACITY */
+    /** DEC_MAX_DYNAMIC_TABLE_CAPACITY */
     uint64_t qpack_dec_max_table_capacity;
 
-    /* MAX_BLOCKED_STREAMS */
+    /** MAX_BLOCKED_STREAMS */
     uint64_t qpack_blocked_streams;
 
 #ifdef XQC_COMPAT_DUPLICATE
-    /* compat with the original qpack encoder's duplicate strategy */
+    /** compat with the original qpack encoder's duplicate strategy */
     xqc_bool_t  qpack_compat_duplicate;
 #endif
 
@@ -280,16 +333,16 @@ typedef void (*xqc_h3_ext_datagram_mss_updated_notify_pt)(xqc_h3_conn_t *conn,
 
 typedef struct xqc_h3_ext_dgram_callbacks_s {
 
-    /* the return value is ignored by XQUIC stack */
+    /** the return value is ignored by XQUIC stack */
     xqc_h3_ext_datagram_read_notify_pt          dgram_read_notify;
 
-    /* the return value is ignored by XQUIC stack */
+    /** the return value is ignored by XQUIC stack */
     xqc_h3_ext_datagram_write_notify_pt         dgram_write_notify;
 
-    /* the return value is ignored by XQUIC stack */
+    /** the return value is ignored by XQUIC stack */
     xqc_h3_ext_datagram_acked_notify_pt         dgram_acked_notify;
 
-    /* the return value is ignored by XQUIC stack */
+    /** the return value is ignored by XQUIC stack */
     xqc_h3_ext_datagram_lost_notify_pt          dgram_lost_notify;
     xqc_h3_ext_datagram_mss_updated_notify_pt   dgram_mss_updated_notify;
 
@@ -299,16 +352,16 @@ typedef struct xqc_h3_ext_dgram_callbacks_s {
  * @brief http3 connection callbacks for application layer
  */
 typedef struct xqc_h3_conn_callbacks_s {
-    /* http3 connection creation callback, REQUIRED for server, OPTIONAL for client */
+    /** http3 connection creation callback, REQUIRED for server, OPTIONAL for client */
     xqc_h3_conn_notify_pt               h3_conn_create_notify;
 
-    /* http3 connection close callback */
+    /** http3 connection close callback */
     xqc_h3_conn_notify_pt               h3_conn_close_notify;
 
-    /* handshake finished callback. which will be triggered when HANDSHAKE_DONE is received */
+    /** handshake finished callback. which will be triggered when HANDSHAKE_DONE is received */
     xqc_h3_handshake_finished_pt        h3_conn_handshake_finished;
 
-    /* ping callback. which will be triggered when ping is acked */
+    /** ping callback. which will be triggered when ping is acked */
     xqc_h3_conn_ping_ack_notify_pt      h3_conn_ping_acked;            /* optional */
 
 } xqc_h3_conn_callbacks_t;
@@ -318,36 +371,36 @@ typedef struct xqc_h3_conn_callbacks_s {
  * @brief http3 request callbacks for application layer
  */
 typedef struct xqc_h3_request_callbacks_s {
-    /* request creation notify. it will be triggered after a request was created, and is required
+    /** request creation notify. it will be triggered after a request was created, and is required
        for server, optional for client */
     xqc_h3_request_notify_pt            h3_request_create_notify;
 
-    /* request close notify. which will be triggered after a request was closed */
+    /** request close notify. which will be triggered after a request was closed */
     xqc_h3_request_notify_pt            h3_request_close_notify;
 
-    /* request read notify callback. which will be triggered after received http headers or body */
+    /** request read notify callback. which will be triggered after received http headers or body */
     xqc_h3_request_read_notify_pt       h3_request_read_notify;
 
-    /* request write notify callback. when triggered, users can continue to send headers or body */
+    /** request write notify callback. when triggered, users can continue to send headers or body */
     xqc_h3_request_notify_pt            h3_request_write_notify;
 
-    /* request closing notify callback, will be triggered when request is closing */
+    /** request closing notify callback, will be triggered when request is closing */
     xqc_h3_request_closing_notify_pt    h3_request_closing_notify;
 
 } xqc_h3_request_callbacks_t;
 
 typedef struct xqc_h3_ext_bytestream_callbacks_s {
 
-    /* the return value is ignored by XQUIC stack */
+    /** the return value is ignored by XQUIC stack */
     xqc_h3_ext_bytestream_notify_pt       bs_create_notify;
 
-    /* the return value is ignored by XQUIC stack */
+    /** the return value is ignored by XQUIC stack */
     xqc_h3_ext_bytestream_notify_pt       bs_close_notify;
 
-    /* negative return values will cause the connection to be closed */
+    /** negative return values will cause the connection to be closed */
     xqc_h3_ext_bytestream_read_notify_pt  bs_read_notify;
 
-    /* negative return values will cause the connection to be closed */
+    /** negative return values will cause the connection to be closed */
     xqc_h3_ext_bytestream_notify_pt       bs_write_notify;
 
 } xqc_h3_ext_bytestream_callbacks_t;
@@ -355,16 +408,16 @@ typedef struct xqc_h3_ext_bytestream_callbacks_s {
 
 typedef struct xqc_h3_callbacks_s {
 
-    /* http3 connection callbacks */
+    /** http3 connection callbacks */
     xqc_h3_conn_callbacks_t           h3c_cbs;
 
-    /* http3 request callbacks */
+    /** http3 request callbacks */
     xqc_h3_request_callbacks_t        h3r_cbs;
 
-    /* datagram callbacks */
+    /** datagram callbacks */
     xqc_h3_ext_dgram_callbacks_t      h3_ext_dgram_cbs;
 
-    /* bytestream callbacks */
+    /** bytestream callbacks */
     xqc_h3_ext_bytestream_callbacks_t h3_ext_bs_cbs;
 
 } xqc_h3_callbacks_t;
@@ -385,7 +438,8 @@ xqc_int_t xqc_h3_ctx_destroy(xqc_engine_t *engine);
 
 
 /**
- * @brief set max h3 max dynamic table capacity
+ * @brief set max h3 max dynamic table capacity. It MUST only be called after 
+ *        xqc_h3_ctx_init.
  * 
  * @param engine the engine handler created by xqc_engine_create
  * @param value capacity of dynamic table, 0 for disable dynamic table 
@@ -394,7 +448,8 @@ XQC_EXPORT_PUBLIC_API
 void xqc_h3_engine_set_max_dtable_capacity(xqc_engine_t *engine, size_t capacity);
 
 /**
- * @brief @deprecated use xqc_h3_engine_set_max_dtable_capacity instead
+ * @brief @deprecated use xqc_h3_engine_set_max_dtable_capacity instead. 
+ *        It MUST only be called after xqc_h3_ctx_init.
  * 
  * @param engine the engine handler created by xqc_engine_create
  * @param value 0:disable dynamic table
@@ -403,7 +458,8 @@ XQC_EXPORT_PUBLIC_API
 void xqc_h3_engine_set_dec_max_dtable_capacity(xqc_engine_t *engine, size_t value);
 
 /**
- * @brief @deprecated use xqc_h3_engine_set_max_dtable_capacity instead
+ * @brief @deprecated use xqc_h3_engine_set_max_dtable_capacity instead.
+ *        It MUST only be called after xqc_h3_ctx_init.
  * 
  * @param engine the engine handler created by xqc_engine_create
  * @param value 0:disable dynamic table
@@ -412,7 +468,8 @@ XQC_EXPORT_PUBLIC_API
 void xqc_h3_engine_set_enc_max_dtable_capacity(xqc_engine_t *engine, size_t value);
 
 /**
- * @brief set max h3 field section size
+ * @brief set max h3 field section size.
+ *        It MUST only be called after xqc_h3_ctx_init.
  * 
  * @param engine the engine handler created by xqc_engine_create
  * @param size size of field section size
@@ -420,17 +477,43 @@ void xqc_h3_engine_set_enc_max_dtable_capacity(xqc_engine_t *engine, size_t valu
 XQC_EXPORT_PUBLIC_API
 void xqc_h3_engine_set_max_field_section_size(xqc_engine_t *engine, size_t size);
 
+/**
+ * @brief set the limit for qpack blocked streams. 
+ *        It MUST only be called after xqc_h3_ctx_init.
+ * 
+ * @param engine 
+ * @param value 
+ * @return XQC_EXPORT_PUBLIC_API 
+ */
+XQC_EXPORT_PUBLIC_API
+void xqc_h3_engine_set_qpack_blocked_streams(xqc_engine_t *engine, size_t value);
+
 #ifdef XQC_COMPAT_DUPLICATE
+/**
+ * @brief It MUST only be called after xqc_h3_ctx_init.
+ * 
+ * @param engine the engine handler created by xqc_engine_create
+ * @param cmpt value
+ * @return XQC_EXPORT_PUBLIC_API 
+ */
 XQC_EXPORT_PUBLIC_API
 void xqc_h3_engine_set_qpack_compat_duplicate(xqc_engine_t *engine,
     xqc_bool_t cmpt);
 #endif
 
+
+/**
+ * User can set h3 settings when h3_conn_create_notify callbacks
+ */
+XQC_EXPORT_PUBLIC_API
+void xqc_h3_engine_set_local_settings(xqc_engine_t *engine, 
+    const xqc_h3_conn_settings_t *h3_conn_settings);
+
 /**
  * @brief create and http3 connection
  * 
  * @param engine return from xqc_engine_create
- * @param conn_settings connection settings
+ * @param conn_settings Include all the connection settings, which should be customized according to the actual needs, and will be defaultly set to internal_default_conn_settings if not specified.
  * @param token token receive from server, xqc_save_token_pt callback
  * @param token_len length of token
  * @param server_host server domain
@@ -512,13 +595,6 @@ XQC_EXPORT_PUBLIC_API
 void *xqc_h3_conn_get_user_data(xqc_h3_conn_t *h3_conn);
 
 
-/**
- * User can set h3 settings when h3_conn_create_notify callbacks
- */
-XQC_EXPORT_PUBLIC_API
-void xqc_h3_conn_set_settings(xqc_h3_conn_t *h3c,
-    const xqc_h3_conn_settings_t *h3_conn_settings);
-
 
 /**
  * @brief get peer address information, server should call this when h3_conn_create_notify triggers
@@ -585,11 +661,12 @@ xqc_int_t xqc_h3_conn_set_qpack_dtable_cap(xqc_h3_conn_t *h3c, size_t capacity);
  * @param engine handler created by xqc_engine_create
  * @param cid connection id of http3 connection
  * @param user_data For request
+ * @param settings stream settings
  * @return handler of http3 request
  */
 XQC_EXPORT_PUBLIC_API
 xqc_h3_request_t *xqc_h3_request_create(xqc_engine_t *engine, const xqc_cid_t *cid, 
-    void *user_data);
+    xqc_stream_settings_t *settings, void *user_data);
 
 /**
  * @brief get statistics of a http3 request user can get it before request destroyed
@@ -626,6 +703,10 @@ void xqc_h3_request_set_user_data(xqc_h3_request_t *h3_request, void *user_data)
  */
 XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_h3_request_close(xqc_h3_request_t *h3_request);
+
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_h3_request_update_settings(xqc_h3_request_t *h3_request, 
+    xqc_stream_settings_t *settings);
 
 /**
  * @brief send http headers to peer
@@ -705,6 +786,9 @@ xqc_stream_id_t xqc_h3_stream_id(xqc_h3_request_t *h3_request);
 /**
  * @brief RFC 9218 HTTP Priority
  */
+XQC_EXPORT_PUBLIC_API
+void xqc_h3_priority_init(xqc_h3_priority_t *prio);
+
 XQC_EXPORT_PUBLIC_API
 size_t xqc_write_http_priority(xqc_h3_priority_t *prio,
     uint8_t *dst, size_t dstcap);

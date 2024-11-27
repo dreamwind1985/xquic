@@ -218,7 +218,7 @@ xqc_vsprintf(unsigned char *buf, unsigned char *last, const char *fmt, va_list a
                 fmt++;
 
                 continue;
-#ifndef WIN32
+#ifndef XQC_SYS_WINDOWS
             case 'r':
                 i64 = (int64_t) va_arg(args, rlim_t);
                 sign = 1;
@@ -281,15 +281,16 @@ xqc_vsprintf(unsigned char *buf, unsigned char *last, const char *fmt, va_list a
 unsigned char *
 xqc_sprintf_num(unsigned char *buf, unsigned char *last, uint64_t ui64, unsigned char zero, uintptr_t hexadecimal, uintptr_t width)
 {
-    unsigned char         *p, temp[XQC_INT64_LEN + 1];
     /*
-     * we need temp[NGX_INT64_LEN] only,
+     * we need temp[XQC_INT64_LEN] only,
      * but icc issues the warning
      */
+    unsigned char   *p, temp[XQC_INT64_LEN + 1];
+
     size_t          len;
     uint32_t        ui32;
-    static unsigned char   hex[] = "0123456789abcdef";
-    static unsigned char   HEX[] = "0123456789ABCDEF";
+    static const unsigned char   hex[] = "0123456789abcdef";
+    static const unsigned char   HEX[] = "0123456789ABCDEF";
 
     p = temp + XQC_INT64_LEN;
 

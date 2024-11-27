@@ -5,80 +5,140 @@ project (xquic)
 
 set (xquic_VERSION_MAJOR 0)
 set (xquic_VERSION_MINOR 1)
-set(CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
+set (CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 
-option (XQC_ENABLE_BBR2 "enable bbr2" ON)
-option (XQC_ENABLE_COPA "enable copa" ON)
-option (XQC_ENABLE_RENO "enable reno" ON)
-option (XQC_ENABLE_UNLIMITED "enable unlimited cc" ON)
-option (XQC_ENABLE_MP_INTEROP "enable MPQUIC interop" ON)
+option (XQC_ENABLE_BBR2 "enable bbr2" OFF)
+option (XQC_ENABLE_COPA "enable copa" OFF)
+option (XQC_ENABLE_RENO "enable reno" OFF)
+option (XQC_ENABLE_UNLIMITED "enable unlimited cc" OFF)
+option (XQC_ENABLE_MP_INTEROP "enable MPQUIC interop" OFF)
+option (XQC_NO_PID_PACKET_PROCESS "do not expose path_id in xqc_engine_packet_process" OFF)
+option (XQC_PROTECT_POOL_MEM "enable write protection for pool memory (for debug)" OFF)
+option (XQC_COMPAT_DUPLICATE "qpack compat dup" OFF)
+option (XQC_ENABLE_FEC "enable fec" OFF)
+option (XQC_ENABLE_XOR "enable fec scheme xor" OFF)
+option (XQC_ENABLE_RSC "enable fec scheme reed-solomon code" OFF)
+option (XQC_ENABLE_PKM "enable fec scheme packet mask" OFF)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
 endif()
 
+
 # SSL lib type, xquic support babassl and boringssl interfaces
 if(NOT SSL_TYPE)
     set(SSL_TYPE "babassl")
+    message(NOTICE "-- SSL_TYPE not set, use default babassl")
 endif()
 
 if(${SSL_TYPE} MATCHES "babassl")
-    # PATH of ssl
+    # PATH of ssl, by default XQUIC will use babassl installed in
+    # /usr/local/babassl if SSL_PATH is not set
     if(NOT SSL_PATH)
         set(SSL_PATH "/usr/local/babassl")
+        message(NOTICE "-- SSL_PATH not set, use default ${SSL_PATH}")
     endif()
 
-    # ssl lib denpendency
-    if(NOT SSL_LIB_PATH)
-        set(SSL_LIB_PATH
-            ${SSL_PATH}/lib/libssl.a
-            ${SSL_PATH}/lib/libcrypto.a
-        )
-    endif()
 elseif(${SSL_TYPE} MATCHES "boringssl")
-    # PATH of ssl
+    add_definitions(-DNOCRYPT=1)
+    # PATH of ssl, by default XQUIC will use boringssl in third_party
     if(NOT SSL_PATH)
         set(SSL_PATH ${CMAKE_CURRENT_SOURCE_DIR}/third_party/boringssl)
+        message(NOTICE "-- SSL_PATH not set, use default ${SSL_PATH}")
+    endif()
+endif()
+
+# Users can use both SSL_DIR or SSL_PATH to specify the ssl path to find the ssl
+# module, if both are defined, SSL_DIR will be used.
+if(NOT SSL_DIR)
+    if(NOT SSL_PATH)
+        # at least SSL_DIR or SSL_PATH shall be set
+        message(FATAL_ERROR "SSL_PATH not set")
+    else()
+        set(SSL_DIR ${SSL_PATH})
+    endif()
+endif()
+
+
+# find ssl module from SSL_DIR if SSL_INC_PATH AND SSL_LIB_PATH not set.
+if(NOT SSL_INC_PATH AND NOT SSL_LIB_PATH)
+    find_package(SSL)
+
+    if(NOT SSL_FOUND)
+        message(FATAL_ERROR "ssl module not found")
+    endif(NOT SSL_FOUND)
+
+    # compat with elder macros
+    if(SSL_DYNAMIC)
+        message(NOTICE "-- Building with dynamic libssl")
+        set(SSL_LIB_PATH ${SSL_LIBRARIES})
+    else()
+        message(NOTICE "-- Building with static libssl")
+        set(SSL_LIB_PATH ${SSL_LIBRARIES_STATIC})
+    endif()
+    set(SSL_INC_PATH ${SSL_INCLUDE_DIR})
+
+else()
+    if(NOT EXISTS ${SSL_INC_PATH})
+        message(FATAL_ERROR "ssl include path not found")
     endif()
 
-    # ssl lib denpendency
-    if(NOT SSL_LIB_PATH)
-        if(CMAKE_SYSTEM_NAME MATCHES "Windows")
-            add_definitions(-DNOCRYPT=1)
-            set(SSL_LIB_PATH
-                ${SSL_PATH}/build/ssl/${CMAKE_BUILD_TYPE}/ssl.lib
-                ${SSL_PATH}/build/crypto/${CMAKE_BUILD_TYPE}/crypto.lib
-        )
-        else()
-            set(SSL_LIB_PATH
-                ${SSL_PATH}/build/ssl/libssl.a
-                ${SSL_PATH}/build/crypto/libcrypto.a
-            )
+    foreach(LIB IN LISTS SSL_LIB_PATH)
+        if(NOT EXISTS ${LIB})
+            message(FATAL_ERROR "ssl lib not found ${LIB}")
         endif()
+    endforeach()
+
+endif()
+
+MESSAGE("-- SSL_TYPE: ${SSL_TYPE}")
+MESSAGE("-- SSL_PATH: ${SSL_PATH}")
+MESSAGE("-- SSL_LIB_PATH: ${SSL_LIB_PATH}")
+MESSAGE("-- SSL_INC_PATH: ${SSL_INC_PATH}")
+
+
+# C_FLAGS
+if(ANDROID_ABI OR PLATFORM MATCHES "mac")
+    if(PLATFORM STREQUAL "mac32")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -m32")
     endif()
 endif()
 
-# ssl include path
-if(NOT SSL_INC_PATH)
-    set(SSL_INC_PATH
-        ${SSL_PATH}/include
-    )
+if(NOT (CMAKE_C_COMPILER_ID MATCHES "MSVC" OR CMAKE_CXX_COMPILER_ID MATCHES "MSVC"))
+    set(CMAKE_C_FLAGS_OPTION "-Werror -Wno-unused -Wno-pointer-sign -Wno-format-security ")
 endif()
 
-MESSAGE("SSL_TYPE= ${SSL_TYPE}")
-MESSAGE("SSL_PATH= ${SSL_PATH}")
-MESSAGE("SSL_LIB_PATH= ${SSL_LIB_PATH}")
-MESSAGE("SSL_INC_PATH= ${SSL_INC_PATH}")
+# C_FLAGS
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O2 -std=gnu11 -Wall ${CMAKE_C_FLAGS_OPTION} -DNDEBUG_PRINT -DNPRINT_MALLOC ")
+set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -O0 -std=gnu11 -Wall ${CMAKE_C_FLAGS_OPTION} -DNDEBUG_PRINT -DNPRINT_MALLOC -DXQC_DEBUG ")
+
+
+if(CMAKE_SYSTEM_NAME MATCHES "Windows")
+    add_definitions(-DXQC_SYS_WINDOWS=1)
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /Zi")
+endif()
+
+
+# configure file
+configure_file (
+    "${CMAKE_CURRENT_SOURCE_DIR}/xqc_configure.h.in"
+    "${CMAKE_CURRENT_SOURCE_DIR}/include/xquic/xqc_configure.h"
+)
+
+include_directories(include
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${SSL_INC_PATH}
+    ${CMAKE_SOURCE_DIR}
+)
+
+option (XQC_PRINT_SECRET "enable TLS secret printing" OFF)
 
 # print tls traffic secret in keylog
 if(XQC_PRINT_SECRET)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DXQC_PRINT_SECRET")
 endif()
 
-if(XQC_COMPAT_DUPLICATE)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DXQC_COMPAT_DUPLICATE")
-endif()
-
+# compat with the stateless reset before version v1.6.0
 if(XQC_COMPAT_GENERATE_SR_PKT)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DXQC_COMPAT_GENERATE_SR_PKT")
 endif()
@@ -98,42 +158,20 @@ if(XQC_SUPPORT_SENDMMSG_BUILD)
     add_definitions(-DXQC_SUPPORT_SENDMMSG)
 endif()
 
-#coverity
+# coverity
 if(GCOV STREQUAL "on")
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fprofile-arcs -ftest-coverage")
 endif()
 
 
 
-# C_FLAGS
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O2 -std=gnu11 -Wall -DNDEBUG_PRINT -DNPRINT_MALLOC ")
-set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -O0 -std=gnu11 -Wall -DNDEBUG_PRINT -DNPRINT_MALLOC -DXQC_DEBUG ")
+# testing
+if(XQC_ENABLE_TESTING)
+    add_subdirectory(tests)
+    add_subdirectory(demo)
+    add_subdirectory(mini)
+endif(XQC_ENABLE_TESTING)
 
-if(NOT CMAKE_SYSTEM_NAME MATCHES "Windows")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror -Wno-unused -Wno-pointer-sign -Wno-format-security ")
-    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -Werror -Wno-unused -Wno-pointer-sign -Wno-format-security ")
-else()
-    add_definitions(-DXQC_SYS_WINDOWS=1)
-endif()
-
-# additional C_FLAGS on mac
-if(PLATFORM STREQUAL "mac32")
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -m32")
-endif()
-
-
-# configure file
-configure_file (
-    "${CMAKE_CURRENT_SOURCE_DIR}/xqc_configure.h.in"
-    "${CMAKE_CURRENT_SOURCE_DIR}/include/xquic/xqc_configure.h"
-)
-
-include_directories(
-    include
-    /usr/local/include
-    "${CMAKE_CURRENT_SOURCE_DIR}"
-    "${CMAKE_CURRENT_BINARY_DIR}/include"
-)
 
 # http3/qpack source
 set(
@@ -190,6 +228,7 @@ set(
     "src/transport/scheduler/xqc_scheduler_minrtt.c"
     "src/transport/scheduler/xqc_scheduler_common.c"
     "src/transport/scheduler/xqc_scheduler_backup.c"
+    "src/transport/scheduler/xqc_scheduler_backup_fec.c"
     "src/transport/scheduler/xqc_scheduler_rap.c"
 )
 
@@ -198,6 +237,47 @@ if(XQC_ENABLE_MP_INTEROP)
         TRANSPORT_SOURCES
         ${TRANSPORT_SOURCES}
         "src/transport/scheduler/xqc_scheduler_interop.c"
+    )
+endif()
+
+
+# fec framework
+set(
+    FEC_FRAMEWORK_SOURCE
+    "src/transport/xqc_fec.c"
+    "src/transport/xqc_fec_scheme.c"
+    "src/transport/fec_schemes/xqc_galois_calculation.c"
+)
+
+if(XQC_ENABLE_XOR)
+    set(
+        FEC_FRAMEWORK_SOURCE
+        ${FEC_FRAMEWORK_SOURCE}
+        "src/transport/fec_schemes/xqc_xor.c"
+    )
+endif()
+
+if(XQC_ENABLE_RSC)
+    set(
+        FEC_FRAMEWORK_SOURCE
+        ${FEC_FRAMEWORK_SOURCE}
+        "src/transport/fec_schemes/xqc_reed_solomon.c"
+    )
+endif()
+
+if(XQC_ENABLE_PKM)
+    set(
+        FEC_FRAMEWORK_SOURCE
+        ${FEC_FRAMEWORK_SOURCE}
+        "src/transport/fec_schemes/xqc_packet_mask.c"
+    )
+endif()
+
+if(XQC_ENABLE_FEC)
+    set(
+        TRANSPORT_SOURCES
+        ${TRANSPORT_SOURCES}
+        ${FEC_FRAMEWORK_SOURCE}
     )
 endif()
 
@@ -215,17 +295,17 @@ if(${SSL_TYPE} MATCHES "boringssl")
     set(
         TLS_SOURCE
         ${TLS_SOURCE}
-        "src/tls/boringssl/xqc_hkdf.c"
-        "src/tls/boringssl/xqc_crypto.c"
-        "src/tls/boringssl/xqc_ssl_if.c"
+        "src/tls/boringssl/xqc_hkdf_impl.c"
+        "src/tls/boringssl/xqc_crypto_impl.c"
+        "src/tls/boringssl/xqc_ssl_if_impl.c"
     )
 elseif(${SSL_TYPE} MATCHES "babassl")
     set(
         TLS_SOURCE
         ${TLS_SOURCE}
-        "src/tls/babassl/xqc_hkdf.c"
-        "src/tls/babassl/xqc_crypto.c"
-        "src/tls/babassl/xqc_ssl_if.c"
+        "src/tls/babassl/xqc_hkdf_impl.c"
+        "src/tls/babassl/xqc_crypto_impl.c"
+        "src/tls/babassl/xqc_ssl_if_impl.c"
     )
 endif()
 
@@ -293,6 +373,7 @@ endif()
 # xquic source
 set (
     XQC_SOURCE
+    ${XQC_SOURCE}
     ${HTTP3_SOURCES}
     ${TRANSPORT_SOURCES}
     ${TLS_SOURCE}
@@ -322,6 +403,7 @@ if(PLATFORM MATCHES "mac")
         ${SSL_LIB_PATH}
         "-Wl"
         -lpthread
+        -lstdc++
     )
 else()
     target_link_libraries(
@@ -334,13 +416,11 @@ else()
 endif()
 
 
-
 # Strip binary for release builds
 if(CMAKE_BUILD_TYPE STREQUAL MinSizeRel)
     add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
             COMMAND ${CMAKE_STRIP} libxquic.so)
 endif()
-
 
 include_directories(${SSL_INC_PATH})
 include_directories(${CMAKE_SOURCE_DIR}/)
@@ -442,4 +522,3 @@ if (XQC_ENABLE_TESTING)
     endif()
 
 endif()
-

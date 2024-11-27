@@ -70,6 +70,11 @@ xqc_datagram_record_mss(xqc_connection_t *conn)
     }
 
     headroom = XQC_ACK_SPACE + XQC_TLS_AEAD_OVERHEAD_MAX_LEN + quic_header_size + XQC_DATAGRAM_HEADER_BYTES;
+    
+    if (conn->conn_settings.fec_params.fec_encoder_scheme) {
+        headroom += XQC_FEC_SPACE;
+    }
+
     if (conn->remote_settings.max_udp_payload_size >= headroom) {
         udp_payload_limit = conn->remote_settings.max_udp_payload_size - headroom;
 
@@ -78,6 +83,9 @@ xqc_datagram_record_mss(xqc_connection_t *conn)
     }
 
     headroom = quic_header_size + XQC_DATAGRAM_HEADER_BYTES;
+    if (conn->conn_settings.fec_params.fec_encoder_scheme) {
+        headroom += XQC_FEC_SPACE;
+    }
     if (conn->pkt_out_size >= headroom) {
         mtu_limit = conn->pkt_out_size - headroom;
 
@@ -231,11 +239,8 @@ xqc_int_t xqc_datagram_send(xqc_connection_t *conn, void *data,
         *dgram_id = dg_id;
     }
 
-    if (!(conn->conn_flag & XQC_CONN_FLAG_TICKING)) {
-        if (0 == xqc_conns_pq_push(conn->engine->conns_active_pq, conn, conn->last_ticked_time)) {
-            conn->conn_flag |= XQC_CONN_FLAG_TICKING;
-        }
-    }
+    xqc_engine_remove_wakeup_queue(conn->engine, conn);
+    xqc_engine_add_active_queue(conn->engine, conn);
 
     if (conn->conn_settings.datagram_redundant_probe
         && conn->dgram_probe_timer >= 0
@@ -250,7 +255,7 @@ xqc_int_t xqc_datagram_send(xqc_connection_t *conn, void *data,
     }
 
     /* call main logic to send packets out */
-    xqc_engine_main_logic_internal(conn->engine);
+    xqc_engine_conn_logic(conn->engine, conn);
 
     return XQC_OK;
 }
@@ -406,11 +411,8 @@ xqc_datagram_send_multiple_internal(xqc_connection_t *conn,
     }
 
     if (*sent_cnt > 0) {
-        if (!(conn->conn_flag & XQC_CONN_FLAG_TICKING)) {
-            if (0 == xqc_conns_pq_push(conn->engine->conns_active_pq, conn, conn->last_ticked_time)) {
-                conn->conn_flag |= XQC_CONN_FLAG_TICKING;
-            }
-        }
+        xqc_engine_remove_wakeup_queue(conn->engine, conn);
+        xqc_engine_add_active_queue(conn->engine, conn);
 
         data = iov[*sent_cnt - 1].iov_base;
         data_len = iov[*sent_cnt - 1].iov_len;
@@ -428,7 +430,7 @@ xqc_datagram_send_multiple_internal(xqc_connection_t *conn,
         }
 
         /* call main logic to send packets out */
-        xqc_engine_main_logic_internal(conn->engine);
+        xqc_engine_conn_logic(conn->engine, conn);
     }
 
     return ret < 0 ? ret : XQC_OK;

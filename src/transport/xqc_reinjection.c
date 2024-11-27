@@ -10,7 +10,6 @@
 #include "src/transport/xqc_cid.h"
 #include "src/transport/xqc_stream.h"
 #include "src/transport/xqc_utils.h"
-#include "src/transport/xqc_wakeup_pq.h"
 #include "src/transport/xqc_packet_out.h"
 
 #include "src/common/xqc_common.h"
@@ -22,32 +21,6 @@
 #include "src/common/xqc_random.h"
 
 #include "xquic/xqc_errno.h"
-
-xqc_bool_t
-xqc_packet_can_reinject(xqc_packet_out_t *packet_out)
-{
-    if (!(packet_out->po_frame_types & XQC_FRAME_BIT_STREAM)) {
-        return XQC_FALSE;
-    }
-
-    if (packet_out->po_flag & XQC_POF_NOT_REINJECT) {
-        return XQC_FALSE;
-    }
-
-    if (XQC_MP_PKT_REINJECTED(packet_out)
-        && (packet_out->po_origin? XQC_MP_PKT_REINJECTED(packet_out->po_origin): XQC_TRUE)) 
-    {
-        return XQC_FALSE;
-    }
-
-    /* DO NOT reinject non-inflight packets (those were old copies of retx pkts) */
-    if (!(packet_out->po_flag & XQC_POF_IN_FLIGHT)) {
-        return XQC_FALSE;
-    }
-
-    return XQC_TRUE;
-}
-
 
 void
 xqc_associate_packet_with_reinjection(xqc_packet_out_t *reinj_origin,
@@ -92,9 +65,12 @@ xqc_packet_out_replicate(xqc_packet_out_t *dst, xqc_packet_out_t *src)
     dst->po_flag &= ~XQC_POF_IN_UNACK_LIST;
     dst->po_flag &= ~XQC_POF_IN_PATH_BUF_LIST;
     dst->po_user_data = src->po_user_data;
+    dst->po_sched_cwnd_blk_ts = 0;
+    dst->po_send_cwnd_blk_ts = 0;
+    dst->po_send_pacing_blk_ts = 0;
 }
 
-static xqc_int_t
+xqc_int_t
 xqc_conn_try_reinject_packet(xqc_connection_t *conn, xqc_packet_out_t *packet_out)
 {
     xqc_path_ctx_t *path = conn->scheduler_callback->xqc_scheduler_get_path(conn->scheduler, conn, packet_out, 1, 1, NULL);
@@ -118,6 +94,9 @@ xqc_conn_try_reinject_packet(xqc_connection_t *conn, xqc_packet_out_t *packet_ou
         po_copy->po_path_flag &= ~XQC_PATH_SPECIFIED_BY_PTO;
     }
 
+    po_copy->po_flag &= ~XQC_POF_RETRANSED;
+    po_copy->po_flag &= ~XQC_POF_SPURIOUS_LOSS;
+
     xqc_associate_packet_with_reinjection(packet_out, po_copy);
 
     xqc_send_queue_insert_send(po_copy, &send_queue->sndq_send_packets, send_queue);
@@ -127,7 +106,7 @@ xqc_conn_try_reinject_packet(xqc_connection_t *conn, xqc_packet_out_t *packet_ou
             "path:%ui|stream_id:%ui|stream_offset:%ui|"
             "pkt_type:%s|origin_pkt_path:%ui|origin_pkt_num:%ui|",
             po_copy->po_path_id, po_copy->po_stream_id, po_copy->po_stream_offset,
-            xqc_frame_type_2_str(packet_out->po_frame_types),
+            xqc_frame_type_2_str(conn->engine, packet_out->po_frame_types),
             packet_out->po_path_id, packet_out->po_pkt.pkt_num);
 
     return XQC_OK;
@@ -146,16 +125,17 @@ xqc_conn_reinject_unack_packets(xqc_connection_t *conn, xqc_reinjection_mode_t m
             && conn->reinj_callback->xqc_reinj_ctl_can_reinject
             && conn->reinj_callback->xqc_reinj_ctl_can_reinject(conn->reinj_ctl, packet_out, mode))
         {
-            
+                    
             if (xqc_conn_try_reinject_packet(conn, packet_out) != XQC_OK) {
                 continue;
             }
 
             xqc_log(conn->log, XQC_LOG_DEBUG, "|MP|REINJ|reinject unacked packets|"
-                    "pkt_num:%ui|size:%ud|pkt_type:%s|frame:%s|",
+                    "pkt_num:%ui|size:%ud|pkt_type:%s|frame:%s|mode:%d|",
                     packet_out->po_pkt.pkt_num, packet_out->po_used_size,
                     xqc_pkt_type_2_str(packet_out->po_pkt.pkt_type),
-                    xqc_frame_type_2_str(packet_out->po_frame_types));
+                    xqc_frame_type_2_str(conn->engine, packet_out->po_frame_types),
+                    mode);
         }
     }
 

@@ -2,12 +2,13 @@ name: Build interop Docker image
 
 on:
   push:
-    branches: [ interop ]
+    branches: [ main, interop ]
 
 permissions: read-all
 
 jobs:
   build:
+    if: github.repository == 'alibaba/xquic'
     permissions:
       packages: write
 

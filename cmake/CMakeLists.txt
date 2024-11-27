@@ -75,6 +75,11 @@ if (XQC_ENABLE_EVENT_LOG)
     set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -DXQC_ENABLE_EVENT_LOG ")
 endif()
 
+# sendmmsg
+if(XQC_SUPPORT_SENDMMSG_BUILD)
+    add_definitions(-DXQC_SUPPORT_SENDMMSG)
+endif()
+
 if(ANDROID)
     set(DYMAMIC_LINK_OPTION 
         ${DYMAMIC_LINK_OPTION}
@@ -102,8 +107,8 @@ if (XQC_BUILD_OPENSSL)
         endif()
 
     else()
-        #set(EXTRA_CONFIGURE_OPENSSL_PARAMS "${EXTRA_CONFIGURE_OPENSSL_PARAMS} ${DYNAMIC_COMPILE_FLAGS} ")
-        #add_subdirectory(external/openssl-cmake)
+        set(EXTRA_CONFIGURE_OPENSSL_PARAMS "${EXTRA_CONFIGURE_OPENSSL_PARAMS} ${DYNAMIC_COMPILE_FLAGS} ")
+        add_subdirectory(external/openssl-cmake)
     endif()
 
     set(DYMAMIC_LINK_OPTION 
@@ -193,6 +198,7 @@ set(
     "src/transport/scheduler/xqc_scheduler_minrtt.c"
     "src/transport/scheduler/xqc_scheduler_common.c"
     "src/transport/scheduler/xqc_scheduler_backup.c"
+    "src/transport/scheduler/xqc_scheduler_backup_fec.c"
     "src/transport/scheduler/xqc_scheduler_rap.c"
 )
 
@@ -201,6 +207,47 @@ if(XQC_ENABLE_MP_INTEROP)
         TRANSPORT_SOURCES
         ${TRANSPORT_SOURCES}
         "src/transport/scheduler/xqc_scheduler_interop.c"
+    )
+endif()
+
+
+# fec framework
+set(
+    FEC_FRAMEWORK_SOURCE
+    "src/transport/xqc_fec.c"
+    "src/transport/xqc_fec_scheme.c"
+    "src/transport/fec_schemes/xqc_galois_calculation.c"
+)
+
+if(XQC_ENABLE_XOR)
+    set(
+        FEC_FRAMEWORK_SOURCE
+        ${FEC_FRAMEWORK_SOURCE}
+        "src/transport/fec_schemes/xqc_xor.c"
+    )
+endif()
+
+if(XQC_ENABLE_RSC)
+    set(
+        FEC_FRAMEWORK_SOURCE
+        ${FEC_FRAMEWORK_SOURCE}
+        "src/transport/fec_schemes/xqc_reed_solomon.c"
+    )
+endif()
+
+if(XQC_ENABLE_PKM)
+    set(
+        FEC_FRAMEWORK_SOURCE
+        ${FEC_FRAMEWORK_SOURCE}
+        "src/transport/fec_schemes/xqc_packet_mask.c"
+    )
+endif()
+
+if(XQC_ENABLE_FEC)
+    set(
+        TRANSPORT_SOURCES
+        ${TRANSPORT_SOURCES}
+        ${FEC_FRAMEWORK_SOURCE}
     )
 endif()
 
@@ -218,17 +265,17 @@ if(${SSL_TYPE} MATCHES "boringssl")
     set(
         TLS_SOURCE
         ${TLS_SOURCE}
-        "src/tls/boringssl/xqc_hkdf.c"
-        "src/tls/boringssl/xqc_crypto.c"
-        "src/tls/boringssl/xqc_ssl_if.c"
+        "src/tls/boringssl/xqc_hkdf_impl.c"
+        "src/tls/boringssl/xqc_crypto_impl.c"
+        "src/tls/boringssl/xqc_ssl_if_impl.c"
     )
 elseif(${SSL_TYPE} MATCHES "babassl")
     set(
         TLS_SOURCE
         ${TLS_SOURCE}
-        "src/tls/babassl/xqc_hkdf.c"
-        "src/tls/babassl/xqc_crypto.c"
-        "src/tls/babassl/xqc_ssl_if.c"
+        "src/tls/babassl/xqc_hkdf_impl.c"
+        "src/tls/babassl/xqc_crypto_impl.c"
+        "src/tls/babassl/xqc_ssl_if_impl.c"
     )
 endif()
 
@@ -292,17 +339,15 @@ if(XQC_ENABLE_UNLIMITED)
     )
 endif()
 
-
-if(XQC_ENABLE_TH3)
-    set(XQC_ENABLE_TUNNEL 1)
+# add tunnel
+if(XQC_ENABLE_TH3 OR XQC_ENABLE_TUNNEL)
     set(
-        TH3_SOURCES
-        "tunnel/tunnel_h3/th3_ctx.c"
-        "tunnel/tunnel_h3/th3_vconn.c"
+        XQC_SOURCE
     )
-endif()
-
-    )
+    if(XQC_ENABLE_TNL_DG)
+        set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -DXQC_ENABLE_TNL_DG ")
+    endif()
+    add_subdirectory(tunnel)
 endif()
 
 if (XQC_NO_SHARED)
@@ -317,6 +362,7 @@ add_library(
     ${TLS_SOURCE}
     ${COMMON_SOURCES}
     ${CONGESTION_CONTROL_SOURCES}
+    ${XQC_SOURCE}
 )
 
 add_dependencies(xquic xquic_global)

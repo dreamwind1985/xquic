@@ -33,6 +33,8 @@ typedef struct xqc_alpn_registration_s {
     /* Application-Layer-Protocol callback functions */
     xqc_app_proto_callbacks_t   ap_cbs;
 
+    void                       *alp_ctx;
+
 } xqc_alpn_registration_t;
 
 
@@ -48,14 +50,13 @@ typedef struct xqc_engine_s {
     xqc_str_hash_table_t           *conns_hash_dcid;        /* For reset packet */
     xqc_str_hash_table_t           *conns_hash_sr_token;    /* For stateless reset */
     xqc_pq_t                       *conns_active_pq;        /* In process */
-    xqc_wakeup_pq_t                *conns_wait_wakeup_pq;   /* Need wakeup after next tick time */
+    xqc_pq_t                       *conns_wait_wakeup_pq;   /* Need wakeup after next tick time */
     uint8_t                         reset_sent_cnt[XQC_RESET_CNT_ARRAY_LEN]; /* remote addr hash */
     xqc_usec_t                      reset_sent_cnt_cleared;
 
     /* tls context */
     xqc_tls_ctx_t                  *tls_ctx;
 
-    /* common */
     xqc_log_t                      *log;
     xqc_random_generator_t         *rand_generator;
 
@@ -67,6 +68,18 @@ typedef struct xqc_engine_s {
 
     /* list of xqc_alpn_registration_t */
     xqc_list_head_t                 alpn_reg_list;
+
+    xqc_conn_settings_t             default_conn_settings;
+
+    char                            scid_buf[XQC_MAX_CID_LEN * 2 + 1];
+    char                            dcid_buf[XQC_MAX_CID_LEN * 2 + 1];
+    char                            sr_token_buf[XQC_STATELESS_RESET_TOKENLEN * 2 + 1];
+    char                            conn_flag_str_buf[1024];
+    char                            frame_type_buf[128];
+    char                            local_addr_str[INET6_ADDRSTRLEN];
+    char                            peer_addr_str[INET6_ADDRSTRLEN];
+
+    void                           *priv_ctx;
 
 } xqc_engine_t;
 
@@ -97,9 +110,19 @@ void xqc_engine_process_conn(xqc_connection_t *conn, xqc_usec_t now);
 
 void xqc_engine_main_logic_internal(xqc_engine_t *engine);
 
+void xqc_engine_conn_logic(xqc_engine_t *engine, xqc_connection_t *conn);
+
+xqc_int_t xqc_engine_add_wakeup_queue(xqc_engine_t *engine, xqc_connection_t *conn);
+
+xqc_int_t xqc_engine_remove_wakeup_queue(xqc_engine_t *engine, xqc_connection_t *conn);
+
+xqc_int_t xqc_engine_add_active_queue(xqc_engine_t *engine, xqc_connection_t *conn);
+
+xqc_int_t xqc_engine_remove_active_queue(xqc_engine_t *engine, xqc_connection_t *conn);
+
 xqc_int_t xqc_engine_get_alpn_callbacks(xqc_engine_t *engine, const char *alpn,
     size_t alpn_len, xqc_app_proto_callbacks_t *cbs);
 
-xqc_bool_t xqc_engine_is_sendmmsg_on(xqc_engine_t *engine);
+xqc_bool_t xqc_engine_is_sendmmsg_on(xqc_engine_t *engine, xqc_connection_t *conn);
 
 #endif

@@ -8,16 +8,16 @@
 /**
  * Public API for using libxquic
  */
-#ifdef WIN32
+#include "xqc_configure.h"
+#include "xquic_typedef.h"
+
+#if defined(XQC_SYS_WINDOWS) && !defined(XQC_ON_MINGW)
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #else
 #include <sys/socket.h>
 #include <arpa/inet.h>
 #endif
-
-#include "xqc_configure.h"
-#include "xquic_typedef.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -28,8 +28,8 @@ extern "C" {
  * @brief engine type definition
  */
 typedef enum {
-    XQC_ENGINE_SERVER,
-    XQC_ENGINE_CLIENT
+    XQC_ENGINE_SERVER   = 0,
+    XQC_ENGINE_CLIENT   = 1
 } xqc_engine_type_t;
 
 
@@ -37,19 +37,20 @@ typedef enum {
  * @brief supported versions for IETF drafts
  */
 typedef enum xqc_proto_version_s {
-    /* placeholder */
-    XQC_IDRAFT_INIT_VER,
+    /** placeholder */
+    XQC_IDRAFT_INIT_VER         = 0,
 
-    /* former version of QUIC RFC 9000 */
-    XQC_VERSION_V1,
+    /** former version of QUIC RFC 9000 */
+    XQC_VERSION_V1              = 1,
 
-    /* IETF Draft-29 */
-    XQC_IDRAFT_VER_29,
+    /** IETF Draft-29 */
+    XQC_IDRAFT_VER_29           = 2,
 
-     /* Special version for version negotiation. */
-    XQC_IDRAFT_VER_NEGOTIATION,
+    /** Special version for version negotiation. */
+    XQC_IDRAFT_VER_NEGOTIATION  = 3,
 
-    XQC_VERSION_MAX
+    /** max value of proto value. */
+    XQC_VERSION_MAX             = 4
 } xqc_proto_version_t;
 
 #define XQC_SUPPORT_VERSION_MAX         64
@@ -67,10 +68,14 @@ typedef enum xqc_proto_version_s {
  */
 #define XQC_MAX_SEND_MSG_ONCE           32
 
-
 #define XQC_INITIAL_PATH_ID             0
 
 #define XQC_DGRAM_RETX_ASKED_BY_APP     1
+
+#define XQC_CO_MAX_NUM                  16
+#define XQC_CO_STR_MAX_LEN              (5 * XQC_CO_MAX_NUM)
+
+#define XQC_FEC_MAX_SCHEME_NUM          5
 
 
 /**
@@ -127,7 +132,8 @@ typedef struct xqc_log_callbacks_s {
      *
      * trace log including XQC_LOG_FATAL, XQC_LOG_ERROR, XQC_LOG_WARN, XQC_LOG_STATS, XQC_LOG_INFO,
      * XQC_LOG_DEBUG, xquic will output logs with the level higher or equal to the level configured
-     * in xqc_congit_t.
+     * in xqc_log_init. Besides, when qlog enable and EVENT_IMPORTANCE_SELECTED importance is set, some
+     * event log will output log by xqc_log_write_err callback.
      */
     void (*xqc_log_write_err)(xqc_log_level_t lvl, const void *buf, size_t size, void *engine_user_data);
 
@@ -138,6 +144,18 @@ typedef struct xqc_log_callbacks_s {
      * mainly when connection close, stream close.
      */
     void (*xqc_log_write_stat)(xqc_log_level_t lvl, const void *buf, size_t size, void *engine_user_data);
+
+    /**
+     * qlog event callback function
+     *
+     * qlog event importance including EVENT_IMPORTANCE_SELECTED, EVENT_IMPORTANCE_CORE, EVENT_IMPORTANCE_BASE,
+     * EVENT_IMPORTANCE_EXTRA and EVENT_IMPORTANCE_REMOVED.
+     * EVENT_IMPORTANCE_CORE, EVENT_IMPORTANCE_BASE and EVENT_IMPORTANCE_EXTRA follow the defination of qlog draft.
+     * EVENT_IMPORTANCE_SELECTED works by xqc_log_write_err
+     * EVENT_IMPORTANCE_REMOVED exits, because the last qlog draft remove some qlog event, but the current qvis tool
+     * still need them.
+     */
+    void (*xqc_qlog_event_write)(qlog_event_importance_t imp, const void *buf, size_t size, void *engine_user_data);
 
 } xqc_log_callbacks_t;
 
@@ -180,9 +198,10 @@ typedef ssize_t (*xqc_stateless_reset_pt)(const unsigned char *buf, size_t size,
     void *user_data);
 
 /**
- * @brief connection closing notify callback function. will be triggered when a
- * connection is not available and will not send/receive data any more. this 
- * callback is helpful to avoid attempts to send data on a closing connection.
+ * @brief connection closing notify callback function.
+ * 
+ * This function will be triggered when a connection is not available and will not send/receive data any more. this 
+ * callback is helpful to avoid attempts to send data on a closing connection. \n
  * NOTICE: this callback function will be triggered at the beginning of
  * connection close, while the conn_close_notify will be triggered at the end of
  * connection close.
@@ -413,21 +432,10 @@ typedef void (*xqc_path_removed_notify_pt)(const xqc_cid_t *scid, uint64_t path_
     void *conn_user_data);
 
 typedef enum {
-    XQC_PATH_DEGRADE,
-    XQC_PATH_RECOVERY,
+    XQC_PATH_DEGRADE     = 0,
+    XQC_PATH_RECOVERY    = 1,
 } xqc_path_status_change_type_t;
 
-/**
- * @brief multi-path quality callback function
- *
- * @param conn connection handler
- * @param scid source connection id of endpoint
- * @param path_id id of path
- * @param conn_user_data user_data of connection
- */
-typedef xqc_bool_t (*xqc_path_status_controller_pt)(xqc_connection_t *conn,
-    const xqc_cid_t *scid, xqc_path_status_change_type_t type, uint64_t path_id,
-    void *conn_user_data);
 
 /**
  * @brief multi-path write socket callback function
@@ -517,6 +525,7 @@ typedef void (*xqc_datagram_write_notify_pt)(xqc_connection_t *conn,
 
 /**
  * @brief the callback API to notify application that a datagram is declared lost.
+ * 
  * However, the datagram could also be acknowledged later, as the underlying
  * loss detection is not fully accurate. Applications should handle this type of
  * spurious loss. The return value indicates how this lost datagram is 
@@ -536,7 +545,7 @@ typedef xqc_int_t (*xqc_datagram_lost_notify_pt)(xqc_connection_t *conn,
 
 /**
  * @brief the callback API to notify application that a datagram is acked. Note,
- *        for every unique dgram_id, this callback will be only called once.
+ * for every unique dgram_id, this callback will be only called once.
  * 
  * @param conn the connection handle
  * @param user_data the dgram_data set by xqc_datagram_set_user_data
@@ -548,8 +557,8 @@ typedef void (*xqc_datagram_acked_notify_pt)(xqc_connection_t *conn,
 
 /**
  * @brief the callback to notify application the MSS of QUIC datagrams. Note, 
- *        the MSS of QUIC datagrams will never shrink. If the MSS is zero, it 
- *        means this connection does not support sending QUIC datagrams.
+ * the MSS of QUIC datagrams will never shrink. If the MSS is zero, it 
+ * means this connection does not support sending QUIC datagrams.
  * 
  * @param conn the connection handle
  * @param user_data the dgram_data set by xqc_datagram_set_user_data
@@ -560,8 +569,9 @@ typedef void (*xqc_datagram_mss_updated_notify_pt)(xqc_connection_t *conn,
 
 
 /**
- * @brief callback functions which are more related to attributes of QUIC [Transport] but not ALPN.
- * In another word, these callback functions are events of QUIC Transport layer, and need to
+ * @brief tranport callback functions are more related to attributes of QUIC [Transport] but not ALPN.
+ * 
+ * These callback functions are events of QUIC Transport layer, and need to
  * interact with application-layer, which have less thing to do with ALPN layer.
  *
  * These callback functions shall directly call back to application layer, with user_data from
@@ -579,17 +589,17 @@ typedef void (*xqc_datagram_mss_updated_notify_pt)(xqc_connection_t *conn,
  * 3. Callbacks between Transport and Application Protocol:
  * QUIC events that might be more essential to Application-Layer-Protocols, especially stream data
  *
- * +------------------------------------------------------------------------------+
- * |                             Application                                      |
- * |                                 +-- Application Protocol defined callbacks --+
- * |                                 |             Application Protocol           |
- * +-------- transport callbacks ----+--------- app protocol callbacks -----------+
- * |                              Transport                                       |
- * +------------------------------------------------------------------------------+
  */
+//  * +------------------------------------------------------------------------------+
+//  * |                             Application                                      |
+//  * |                                 +-- Application Protocol defined callbacks --+
+//  * |                                 |             Application Protocol           |
+//  * +-------- transport callbacks ----+--------- app protocol callbacks -----------+
+//  * |                              Transport                                       |
+//  * +------------------------------------------------------------------------------+
 typedef struct xqc_transport_callbacks_s {
     /**
-     * accept new connection callback. REQUIRED only for server
+     * accept new connection callback. REQUIRED only for server \n
      * NOTICE: this is the headmost callback trigger by xquic, the user_data of server_accept is
      * what was passed into xqc_engine_packet_process
      */
@@ -600,7 +610,7 @@ typedef struct xqc_transport_callbacks_s {
      */
     xqc_server_refuse_pt            server_refuse;
 
-    /* stateless reset callback */
+    /** stateless reset callback */
     xqc_stateless_reset_pt          stateless_reset;
 
     /**
@@ -663,11 +673,6 @@ typedef struct xqc_transport_callbacks_s {
      */
     xqc_path_removed_notify_pt      path_removed_notify;
 
-    /*
-     * Decision function for path status change. OPTIONAL for both client and server
-     */
-    xqc_path_status_controller_pt   path_status_controller;
-
     /**
      * connection closing callback function. OPTIONAL for both client and server
      */
@@ -727,10 +732,12 @@ typedef struct xqc_conn_callbacks_s {
 } xqc_conn_callbacks_t;
 
 
-/* QUIC layer stream callback functions */
+/**
+ * @brief QUIC layer stream callback functions 
+ */
 typedef struct xqc_stream_callbacks_s {
     /**
-     * stream read callback function. REQUIRED for both client and server
+     * @brief stream read callback function. REQUIRED for both client and server
      *
      * this will be triggered when QUIC stream data is ready for read. application layer could read
      * data when xqc_stream_recv interface.
@@ -738,7 +745,7 @@ typedef struct xqc_stream_callbacks_s {
     xqc_stream_notify_pt            stream_read_notify;
 
     /**
-     * stream write callback function. REQUIRED for both client and server
+     * @brief stream write callback function. REQUIRED for both client and server
      *
      * when sending data with xqc_stream_send, xquic might be blocked or send part of the data. if
      * this callback function is triggered, applications can continue to send the rest data.
@@ -746,7 +753,7 @@ typedef struct xqc_stream_callbacks_s {
     xqc_stream_notify_pt            stream_write_notify;
 
     /**
-     * stream create callback function. REQUIRED for server, OPTIONAL for client.
+     * @brief stream create callback function. REQUIRED for server, OPTIONAL for client.
      *
      * this will be triggered when QUIC stream is created. applications can create its own stream
      * context in this callback function.
@@ -754,7 +761,7 @@ typedef struct xqc_stream_callbacks_s {
     xqc_stream_notify_pt            stream_create_notify;
 
     /**
-     * stream close callback function. REQUIRED for both server and client.
+     * @brief stream close callback function. REQUIRED for both server and client.
      *
      * this will be triggered when QUIC stream is finally closed. xquic will close stream after
      * sending or receiving RESET_STREAM frame after 3 times of PTO, or when connection is closed.
@@ -771,10 +778,12 @@ typedef struct xqc_stream_callbacks_s {
 
 } xqc_stream_callbacks_t;
 
-/* QUIC layer datagram callback functions */
+/**
+ * @brief QUIC layer datagram callback functions
+ */
 typedef struct xqc_datagram_callbacks_s {
     /**
-     * datagram read callback function. REQUIRED for both client and server if they want to use datagram
+     * @brief datagram read callback function. REQUIRED for both client and server if they want to use datagram
      *
      * this will be triggered when a QUIC datagram is received. application layer could read
      * data from the arguments of this callback.
@@ -782,7 +791,7 @@ typedef struct xqc_datagram_callbacks_s {
     xqc_datagram_read_notify_pt         datagram_read_notify;
 
     /**
-     * datagram write callback function. REQUIRED for both client and server if they want to use datagram
+     * @brief datagram write callback function. REQUIRED for both client and server if they want to use datagram
      *
      * when sending data with xqc_datagram_send or xqc_datagram_send_multiple, xquic might be blocked or send part of the data. if
      * this callback function is triggered, applications can continue to send the rest data.
@@ -790,14 +799,14 @@ typedef struct xqc_datagram_callbacks_s {
     xqc_datagram_write_notify_pt        datagram_write_notify;
 
     /**
-     * datagram acked callback function. OPTIONAL for server and client.
+     * @brief datagram acked callback function. OPTIONAL for server and client.
      *
      * this will be triggered when a QUIC packet containing a DATAGRAM frame is acked. 
      */
     xqc_datagram_acked_notify_pt        datagram_acked_notify;
 
     /**
-     * datagram lost callback function. OPTIONAL for server and client.
+     * @brief datagram lost callback function. OPTIONAL for server and client.
      *
      * this will be triggered when a QUIC packet containing a DATAGRAM frame is lost. 
      */
@@ -814,13 +823,19 @@ typedef struct xqc_datagram_callbacks_s {
  */
 typedef struct xqc_app_proto_callbacks_s {
 
-    /* QUIC connection callback functions for Application-Layer-Protocol */
+    /**
+     * @brief QUIC connection callback functions for Application-Layer-Protocol 
+     */
     xqc_conn_callbacks_t        conn_cbs;
 
-    /* QUIC stream callback functions */
+    /**
+     * @brief QUIC stream callback functions 
+     */
     xqc_stream_callbacks_t      stream_cbs;
 
-    /* QUIC datagram callback functions */
+    /**
+     *  @brief QUIC datagram callback functions 
+     */
     xqc_datagram_callbacks_t    dgram_cbs;
 
 } xqc_app_proto_callbacks_t;
@@ -835,97 +850,144 @@ typedef enum {
     XQC_DATA_QOS_PROBING = 7,
 } xqc_data_qos_level_t;
 
+/**
+ * @brief congestion control algorithm parameters
+ */
 typedef struct xqc_cc_params_s {
     uint32_t    customize_on;
     uint32_t    init_cwnd;
     uint32_t    min_cwnd;
     uint32_t    expect_bw;
     uint32_t    max_expect_bw;
+    uint8_t     bbr_enable_lt_bw;
+    uint8_t     bbr_ignore_app_limit;
     uint32_t    cc_optimization_flags;
-    /* 0 < delta <= delta_max, default 0.05, ->0 = more throughput-oriented */
+    /** 0 < delta <= delta_max, default 0.05, ->0 = more throughput-oriented */
     double      copa_delta_base; 
-    /* 0 < delta_max <= 1.0, default 0.5 */
+    /** 0 < delta_max <= 1.0, default 0.5 */
     double      copa_delta_max;
-    /* 
+    /** 
      * 1.0 <= delta_ai_unit, default 1.0, greater values mean more aggressive
      * when Copa competes with loss-based CCAs.
      */
     double      copa_delta_ai_unit;
 } xqc_cc_params_t;
 
+/**
+ * @brief multipath scheduler algorithm parameters
+ */
 typedef struct xqc_scheduler_params_u {
-    uint8_t customize_on;
-    union {
-        struct {
-            double lambda_max;
-            double lambda_min;
-            double lambda_init;
-            double lambda_inc;
-            double lambda_dec;
-        } blest_params;
-
-        struct {
-            double beta;
-        } ecf_params;
-    };
+    uint64_t    rtt_us_thr_high;
+    uint64_t    rtt_us_thr_low;
+    uint64_t    bw_Bps_thr;
+    double      loss_percent_thr_high;
+    double      loss_percent_thr_low;
+    uint32_t    pto_cnt_thr;
 } xqc_scheduler_params_t;
 
+/**
+ * @brief FEC schemes type enum
+ */
+typedef enum {
+    XQC_REED_SOLOMON_CODE  = 8,
+    XQC_XOR_CODE = 11,
+    XQC_PACKET_MASK_CODE = 12,
+} xqc_fec_schemes_e;
+
+typedef enum {
+    XQC_FEC_MP_DEFAULT = 0,
+    XQC_FEC_MP_USE_STB = 1,
+} xqc_fec_mp_mode_e;
+
+/**
+ * @brief FEC parameters on connection settings
+ */
+typedef struct xqc_fec_params_s {
+    /** code rate represents the source symbol percents in total symbols */
+    float                   fec_code_rate;
+    /** element bit size of current fec finite filed */
+    xqc_int_t               fec_ele_bit_size;
+    /** frame type that should be protected by fec */
+    uint64_t                fec_protected_frames;
+    /** maximum number of block that current host can store */
+    uint64_t                fec_max_window_size;
+    /** fec specific mp mode */
+    xqc_fec_mp_mode_e       fec_mp_mode;
+    /** (B) maximum symbol number of each block */
+    uint64_t                fec_max_symbol_num_per_block;
+    
+    xqc_int_t               fec_encoder_schemes_num;
+    xqc_int_t               fec_decoder_schemes_num;
+    /** fec schemes supported by current host as encoder */
+    xqc_fec_schemes_e       fec_encoder_schemes[XQC_FEC_MAX_SCHEME_NUM];
+    /** fec schemes supported by current host as decoder */
+    xqc_fec_schemes_e       fec_decoder_schemes[XQC_FEC_MAX_SCHEME_NUM];
+
+    /** final fec scheme as encoder after negotiation */
+    xqc_fec_schemes_e       fec_encoder_scheme;
+    /** final fec scheme as decoder after negotiation */
+    xqc_fec_schemes_e       fec_decoder_scheme;
+} xqc_fec_params_t;
+
+/**
+ * @brief congestion control callbacks
+ */
 typedef struct xqc_congestion_control_callback_s {
-    /* Callback on initialization, for memory allocation */
+    /** Callback on initialization, for memory allocation */
     size_t (*xqc_cong_ctl_size)(void);
 
-    /* Callback on connection initialization, support for passing in congestion algorithm parameters */
+    /** Callback on connection initialization, support for passing in congestion algorithm parameters */
     void (*xqc_cong_ctl_init)(void *cong_ctl, xqc_send_ctl_t *ctl_ctx, xqc_cc_params_t cc_params);
 
-    /* Callback when packet loss is detected, reduce congestion window according to algorithm */
+    /** Callback when packet loss is detected, reduce congestion window according to algorithm */
     void (*xqc_cong_ctl_on_lost)(void *cong_ctl, xqc_usec_t lost_sent_time);
 
-    /* Callback when packet acked, increase congestion window according to algorithm */
+    /** Callback when packet acked, increase congestion window according to algorithm */
     void (*xqc_cong_ctl_on_ack)(void *cong_ctl, xqc_packet_out_t *po, xqc_usec_t now);
 
-    /* Callback when sending a packet, to determine if the packet can be sent */
+    /** Callback when sending a packet, to determine if the packet can be sent */
     uint64_t (*xqc_cong_ctl_get_cwnd)(void *cong_ctl);
 
-    /* Callback when all packets are detected as lost within 1-RTT, reset the congestion window */
+    /** Callback when all packets are detected as lost within 1-RTT, reset the congestion window */
     void (*xqc_cong_ctl_reset_cwnd)(void *cong_ctl);
 
-    /* If the connection is in slow start state */
+    /** If the connection is in slow start state */
     int (*xqc_cong_ctl_in_slow_start)(void *cong_ctl);
 
-    /* If the connection is in recovery state. */
+    /** If the connection is in recovery state. */
     int (*xqc_cong_ctl_in_recovery)(void *cong_ctl);
 
-    /* This function is used by BBR and Cubic*/
+    /** This function is used by BBR and Cubic*/
     void (*xqc_cong_ctl_restart_from_idle)(void *cong_ctl, uint64_t arg);
 
-    /* For BBR */
+    /** For BBR */
     void (*xqc_cong_ctl_on_ack_multiple_pkts)(void *cong_ctl, xqc_sample_t *sampler);
 
-    /* initialize bbr */
+    /** initialize bbr */
     void (*xqc_cong_ctl_init_bbr)(void *cong_ctl, xqc_sample_t *sampler, xqc_cc_params_t cc_params);
 
-    /* get pacing rate */
+    /** get pacing rate */
     uint32_t (*xqc_cong_ctl_get_pacing_rate)(void *cong_ctl);
 
-    /* get estimation of bandwidth */
+    /** get estimation of bandwidth */
     uint32_t (*xqc_cong_ctl_get_bandwidth_estimate)(void *cong_ctl);
 
     xqc_bbr_info_interface_t *xqc_cong_ctl_info_cb;
 } xqc_cong_ctrl_callback_t;
 
 #ifdef XQC_ENABLE_RENO
-XQC_EXPORT_PUBLIC_API extern const xqc_cong_ctrl_callback_t xqc_reno_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_reno_cb;
 #endif
 #ifdef XQC_ENABLE_BBR2
-XQC_EXPORT_PUBLIC_API extern const xqc_cong_ctrl_callback_t xqc_bbr2_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_bbr2_cb;
 #endif
-XQC_EXPORT_PUBLIC_API extern const xqc_cong_ctrl_callback_t xqc_bbr_cb;
-XQC_EXPORT_PUBLIC_API extern const xqc_cong_ctrl_callback_t xqc_cubic_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_bbr_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_cubic_cb;
 #ifdef XQC_ENABLE_UNLIMITED
-XQC_EXPORT_PUBLIC_API extern const xqc_cong_ctrl_callback_t xqc_unlimited_cc_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_unlimited_cc_cb;
 #endif
 #ifdef XQC_ENABLE_COPA
-XQC_EXPORT_PUBLIC_API extern const xqc_cong_ctrl_callback_t xqc_copa_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_cong_ctrl_callback_t xqc_copa_cb;
 #endif
 
 typedef enum xqc_scheduler_path_event_e {
@@ -937,6 +999,9 @@ typedef enum xqc_scheduler_conn_event_e {
     XQC_SCHED_EVENT_CONN_ROUND_FIN   = 1,
 } xqc_scheduler_conn_event_t;
 
+/**
+ * @brief multipath scheduler callbacks
+ */
 typedef struct xqc_scheduler_callback_s {
 
     size_t (*xqc_scheduler_size)(void);
@@ -955,11 +1020,12 @@ typedef struct xqc_scheduler_callback_s {
 
 } xqc_scheduler_callback_t;
 
-XQC_EXPORT_PUBLIC_API extern const xqc_scheduler_callback_t xqc_minrtt_scheduler_cb;
-XQC_EXPORT_PUBLIC_API extern const xqc_scheduler_callback_t xqc_backup_scheduler_cb;
-XQC_EXPORT_PUBLIC_API extern const xqc_scheduler_callback_t xqc_rap_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_minrtt_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_backup_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_backup_fec_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_rap_scheduler_cb;
 #ifdef XQC_ENABLE_MP_INTEROP
-XQC_EXPORT_PUBLIC_API extern const xqc_scheduler_callback_t xqc_interop_scheduler_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_scheduler_callback_t xqc_interop_scheduler_cb;
 #endif
 
 typedef enum {
@@ -982,50 +1048,66 @@ typedef struct xqc_reinj_ctl_callback_s {
 
 } xqc_reinj_ctl_callback_t;
 
-XQC_EXPORT_PUBLIC_API extern const xqc_reinj_ctl_callback_t xqc_default_reinj_ctl_cb;
-XQC_EXPORT_PUBLIC_API extern const xqc_reinj_ctl_callback_t xqc_deadline_reinj_ctl_cb;
-XQC_EXPORT_PUBLIC_API extern const xqc_reinj_ctl_callback_t xqc_dgram_reinj_ctl_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_reinj_ctl_callback_t xqc_default_reinj_ctl_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_reinj_ctl_callback_t xqc_deadline_reinj_ctl_cb;
+XQC_EXPORT_PUBLIC_API XQC_EXTERN const xqc_reinj_ctl_callback_t xqc_dgram_reinj_ctl_cb;
 
+typedef struct xqc_fec_code_callback_s {
+    void (*xqc_fec_init)(xqc_connection_t *conn);
+    xqc_int_t (*xqc_fec_encode)(xqc_connection_t *conn, unsigned char *unit_data, size_t un_size, unsigned char **outputs,
+                                uint8_t fec_bm_mode);
+    xqc_int_t (*xqc_fec_decode)(xqc_connection_t *conn, unsigned char **recovered_symbols_buff, size_t *size, xqc_int_t block_idx);
+    xqc_int_t (*xqc_fec_decode_one)(xqc_connection_t *conn, unsigned char *recovered_symbols_buff,
+                                    xqc_int_t block_id, xqc_int_t symbol_idx);
+    void (*xqc_fec_init_one)(xqc_connection_t *conn, uint8_t bm_idx);
+} xqc_fec_code_callback_t;
+
+XQC_EXPORT_PUBLIC_API extern const xqc_fec_code_callback_t xqc_xor_code_cb;
+XQC_EXPORT_PUBLIC_API extern const xqc_fec_code_callback_t xqc_reed_solomon_code_cb;
+XQC_EXPORT_PUBLIC_API extern const xqc_fec_code_callback_t xqc_packet_mask_code_cb;
 
 /**
  * @struct xqc_config_t
  * QUIC config parameters
  */
 typedef struct xqc_config_s {
-    /* log level */
+    /** log level */
     xqc_log_level_t cfg_log_level;
 
-    /* enable log based on event or not, non-zero for enable, 0 for not */
+    /** enable log based on event or not, non-zero for enable, 0 for not */
     xqc_flag_t      cfg_log_event;
 
-    /* print timestamp in log or not, non-zero for print, 0 for not */
+    /** qlog evnet importance */
+    qlog_event_importance_t cfg_qlog_importance;
+
+    /** print timestamp in log or not, non-zero for print, 0 for not */
     xqc_flag_t      cfg_log_timestamp;
 
-    /* print level name in log or not, non-zero for print, 0 for not */
+    /** print level name in log or not, non-zero for print, 0 for not */
     xqc_flag_t      cfg_log_level_name;
 
-    /* connection memory pool size, which will be used for congestion control */
+    /** connection memory pool size, which will be used for congestion control */
     size_t          conn_pool_size;
 
-    /* bucket size of stream hash table in xqc_connection_t */
+    /** bucket size of stream hash table in xqc_connection_t */
     size_t          streams_hash_bucket_size;
 
-    /* bucket size of connection hash table in engine */
+    /** bucket size of connection hash table in engine */
     size_t          conns_hash_bucket_size;
 
-    /* capacity of connection priority queue in engine */
+    /** capacity of connection priority queue in engine */
     size_t          conns_active_pq_capacity;
 
-    /* capacity of wakeup connection priority queue in engine */
+    /** capacity of wakeup connection priority queue in engine */
     size_t          conns_wakeup_pq_capacity;
 
-    /* supported quic version list, actually draft-29 and quic-v1 is supported */
+    /** supported quic version list, actually draft-29 and quic-v1 is supported */
     uint32_t        support_version_list[XQC_SUPPORT_VERSION_MAX];
 
-    /* supported quic version count */
+    /** supported quic version count */
     uint32_t        support_version_count;
 
-    /* default connection id length */
+    /** default connection id length */
     uint8_t         cid_len;
 
     /**
@@ -1037,7 +1119,7 @@ typedef struct xqc_config_s {
      */
     uint8_t         cid_negotiate;
 
-    /* used to generate stateless reset token */
+    /** used to generate stateless reset token */
     char            reset_token_key[XQC_RESET_TOKEN_MAX_KEY_LEN];
     size_t          reset_token_keylen;
 
@@ -1055,6 +1137,13 @@ typedef struct xqc_config_s {
      * 
      */
     uint8_t         enable_h3_ext;
+
+    /**
+     * @brief manually call mainlogic after stream/request send      
+     * 
+     */
+    uint8_t         manually_triggered_send;
+
 } xqc_config_t;
 
 
@@ -1062,47 +1151,58 @@ typedef struct xqc_config_s {
  * @brief engine callback functions.
  */
 typedef struct xqc_engine_callback_s {
-    /* timer callback for event loop */
+    /** timer callback for event loop */
     xqc_set_event_timer_pt          set_event_timer;
 
-    /* write log file callback, REQUIRED */
+    /** write log file callback, REQUIRED */
     xqc_log_callbacks_t             log_callbacks;
 
-    /* custom cid generator, OPTIONAL for server */
+    /** custom cid generator, OPTIONAL for server */
     xqc_cid_generate_pt             cid_generate_cb;
 
-    /* tls secret callback, OPTIONAL */
+    /** tls secret callback, OPTIONAL */
     xqc_eng_keylog_pt               keylog_cb;
 
-    /* get realtime timestamp callback function. if not set, xquic will get timestamp with inner
+    /** get realtime timestamp callback function. if not set, xquic will get timestamp with inner
        function xqc_now, which relies on gettimeofday */
     xqc_timestamp_pt                realtime_ts;
 
-    /* get monotonic increasing timestamp callback function. if not set, xquic will get timestamp
+    /** get monotonic increasing timestamp callback function. if not set, xquic will get timestamp
        with inner function xqc_now, which relies on gettimeofday */
     xqc_timestamp_pt                monotonic_ts;
 
 } xqc_engine_callback_t;
 
-
+/**
+ * @brief engine's ssl config
+ */
 typedef struct xqc_engine_ssl_config_s {
-    char       *private_key_file;           /* For server */
-    char       *cert_file;                  /* For server */
+    /** private key filefor server */
+    char       *private_key_file;
+    /** certificate file for server */
+    char       *cert_file;
     char       *ciphers;
     char       *groups;
 
-    uint32_t    session_timeout;            /* Session lifetime in second */
-    char       *session_ticket_key_data;    /* For server */
-    size_t      session_ticket_key_len;     /* For server */
+    /** session lifetime in second */
+    uint32_t    session_timeout;
+    /** session ticket key for server */
+    char       *session_ticket_key_data;
+    /** session ticket key length for server */ 
+    size_t      session_ticket_key_len;
 
 } xqc_engine_ssl_config_t;
-
 
 
 typedef enum {
     XQC_TLS_CERT_FLAG_NEED_VERIFY        = 1 << 0,
     XQC_TLS_CERT_FLAG_ALLOW_SELF_SIGNED  = 1 << 1,
 } xqc_cert_verify_flag_e;
+
+typedef enum {
+    XQC_RED_NOT_USE             = 0,
+    XQC_RED_SET_CLOSE           = 1,
+} xqc_dgram_red_setting_e;
 
 /**
  * @brief connection tls config for client
@@ -1138,47 +1238,77 @@ typedef struct xqc_conn_ssl_config_s {
 } xqc_conn_ssl_config_t;
 
 typedef struct xqc_linger_s {
-    uint32_t                    linger_on;          /* close connection after all data sent and acked, default: 0 */
-    xqc_usec_t                  linger_timeout;     /* 3*PTO if linger_timeout is 0 */
+    /** close connection after all data sent and acked, default: 0 */
+    uint32_t                    linger_on; 
+    /** 3*PTO if linger_timeout is 0 */
+    xqc_usec_t                  linger_timeout; 
 } xqc_linger_t;
 
-typedef struct xqc_conn_settings_s {
-    int                         pacing_on;          /* default: 0 */
-    int                         ping_on;            /* client sends PING to keepalive, default:0 */
-    xqc_cong_ctrl_callback_t    cong_ctrl_callback; /* default: xqc_cubic_cb */
-    xqc_cc_params_t             cc_params;
-    uint32_t                    so_sndbuf;          /* socket option SO_SNDBUF, 0 for unlimited */
-    uint64_t                    sndq_packets_used_max;  /* 
-                                                         * default: XQC_SNDQ_PACKETS_USED_MAX. 
-                                                         * It should be set to buffer 2xBDP packets at least for performance consideration. 
-                                                         * The default value is 16000 pkts. 
-                                                         */
-    xqc_linger_t                linger;
-    xqc_proto_version_t         proto_version;      /* QUIC protocol version */
-    xqc_msec_t                  init_idle_time_out; /* initial idle timeout interval, effective before handshake completion */
-    xqc_msec_t                  idle_time_out;      /* idle timeout interval, effective after handshake completion */
-    int32_t                     spurious_loss_detect_on;
-    uint32_t                    anti_amplification_limit;   /* limit of anti-amplification, default 3 */
-    uint64_t                    keyupdate_pkt_threshold;    /* packet limit of a single 1-rtt key, 0 for unlimited */
-    size_t                      max_pkt_out_size;
+typedef enum {
+    XQC_ERR_MULTIPATH_VERSION   = 0x00,
+    XQC_MULTIPATH_10            = 0x0a, 
+} xqc_multipath_version_t;
 
-    /*
-    * datgram option
-    * 0: no support for datagram mode (default)
-    * >0: the max size of datagrams that the local end is willing to receive
-    * 65535: the local end is willing to receive a datagram with any length as 
-    *        long as it fits in a QUIC packet
-    */
+typedef enum {
+    XQC_ERR_FEC_VERSION         = 0x00,
+    XQC_FEC_02                  = 0x02,
+} xqc_fec_version_t;
+
+
+/**
+ * @brief structures of connection settings
+ */
+typedef struct xqc_conn_settings_s {
+    /** default: 0 */
+    int                         pacing_on;
+    /** client sends PING to keepalive, default:0 */
+    int                         ping_on;
+    /** default: xqc_cubic_cb */
+    xqc_cong_ctrl_callback_t    cong_ctrl_callback; 
+    xqc_cc_params_t             cc_params;
+    /** socket option SO_SNDBUF, 0 for unlimited */
+    uint32_t                    so_sndbuf;
+    /** 
+     * default: XQC_SNDQ_PACKETS_USED_MAX. 
+     * It should be set to buffer 2xBDP packets at least for performance consideration. 
+     * The default value is 16000 pkts. 
+     */
+    uint64_t                    sndq_packets_used_max;
+    xqc_linger_t                linger;
+    /** QUIC protocol version */
+    xqc_proto_version_t         proto_version;
+    /** initial idle timeout interval, effective before handshake completion */
+    xqc_msec_t                  init_idle_time_out; 
+    /** idle timeout interval, effective after handshake completion */
+    xqc_msec_t                  idle_time_out;
+    int32_t                     spurious_loss_detect_on;
+    /** limit of anti-amplification, default 5 */
+    uint32_t                    anti_amplification_limit;
+    /** packet limit of a single 1-rtt key, 0 for unlimited */ 
+    uint64_t                    keyupdate_pkt_threshold; 
+    size_t                      max_pkt_out_size;
+    size_t                      probing_pkt_out_size;
+
+    /**
+     * datgram option
+     * 0: no support for datagram mode (default)
+     * >0: the max size of datagrams that the local end is willing to receive
+     * 65535: the local end is willing to receive a datagram with any length as long as it fits in a QUIC packet
+     */
     uint16_t                    max_datagram_frame_size;
     
-    /* 
+    /** 
      * multipath option:
-     * https://datatracker.ietf.org/doc/html/draft-ietf-quic-multipath-04#section-3
+     * https://datatracker.ietf.org/doc/html/draft-ietf-quic-multipath-05#section-3
      * 0: don't support multipath
      * 1: supports multipath (unified solution) - multiple PN spaces
      */
     uint64_t                    enable_multipath;
-    /*
+    xqc_multipath_version_t     multipath_version;
+    uint64_t                    init_max_path_id;
+    uint64_t                    least_available_cid_count;
+
+    /**
      * reinjection option:
      * 0: default, no reinjection
      * bit0 = 1: 
@@ -1189,7 +1319,7 @@ typedef struct xqc_conn_settings_s {
      *    reinject unacked packets after sending packets.
      */
     int                         mp_enable_reinjection;
-    /*
+    /**
      * deadline = max(low_bound, min(hard_deadline, srtt * srtt_factor))
      * default values:
      *   low_bound = 0
@@ -1200,7 +1330,7 @@ typedef struct xqc_conn_settings_s {
     uint64_t                    reinj_hard_deadline;
     uint64_t                    reinj_deadline_lower_bound;
 
-    /*
+    /**
      * By default, XQUIC returns ACK_MPs on the path where the data 
      * is received unless the path is not avaliable anymore. 
      * 
@@ -1209,53 +1339,120 @@ typedef struct xqc_conn_settings_s {
      */
     uint8_t                     mp_ack_on_any_path;
 
-    /*
+    /**
      * When sending a ping packet for connection keep-alive, we replicate the 
      * the packet on all acitve paths to keep all paths alive (disable:0, enable:1).
      * The default value is 0.
      */
     uint8_t                     mp_ping_on;
     
-    /* scheduler callback, default: xqc_minrtt_scheduler_cb */
+    /** scheduler callback, default: xqc_minrtt_scheduler_cb */
     xqc_scheduler_callback_t    scheduler_callback;
     xqc_scheduler_params_t      scheduler_params;
 
-    /* reinj_ctl callback, default: xqc_default_reinj_ctl_cb */
+    /** reinj_ctl callback, default: xqc_default_reinj_ctl_cb */
     xqc_reinj_ctl_callback_t    reinj_ctl_callback;
 
-    /* mark path unreachable if ctl_pto_count > path_unreachable_pto_count */
-    uint64_t                    path_unreachable_pto_count;
-
+    /** ms */
     xqc_msec_t                  standby_path_probe_timeout;
 
-    /* params for performance tuning */
-    /* max ack delay: ms */
+    /** params for performance tuning */
+    /** max ack delay: ms */
     uint32_t                    max_ack_delay;
-    /* generate an ACK if received ack-eliciting pkts >= ack_frequency */
+    /** generate an ACK if received ack-eliciting pkts >= ack_frequency */
     uint32_t                    ack_frequency; 
+    uint8_t                     adaptive_ack_frequency;
     uint64_t                    loss_detection_pkt_thresh;
     double                      pto_backoff_factor;
 
-    /* datagram redundancy: 0 disable, 1 enable, 2 only enable multipath redundancy */
+    /** datagram redundancy: 0 disable, 1 enable, 2 only enable multipath redundancy */
     uint8_t                     datagram_redundancy;
     uint8_t                     datagram_force_retrans_on;
     uint64_t                    datagram_redundant_probe;
 
-    /* enable PMTUD */
+    /** enable PMTUD */
     uint8_t                     enable_pmtud;
-    /* probing interval (us), default: 500000 */
+    /** probing interval (us), default: 500000 */
     uint64_t                    pmtud_probing_interval; 
 
-    /* enable marking reinjected packets with reserved bits */
+    /** enable marking reinjected packets with reserved bits */
     uint8_t                     marking_reinjection;
+
+    /** 
+     * The limitation on conn recv rate (only applied to stream data) in bytes per second.
+     * NOTE: the minimal rate limitation is (63000/RTT) Bps. For instance, if RTT is 60ms,
+     * the minimal valid rate limitation is about 1MBps. Any recv_rate_bytes_per_sec less
+     * than the minimal valid rate limitation will not be guaranteed.
+     * default: 0 (no limitation).
+     */
+    uint64_t                    recv_rate_bytes_per_sec;
+
+    /**
+     * The switch to enable stream-level recv rate throttling. Default: off (0)
+     */
+    uint8_t                     enable_stream_rate_limit;
+
+    /**
+     * initial recv window. Default: 0 (use the internal default value)
+     */
+    uint32_t                    init_recv_window;
+
+    /**
+     * initial flow control value
+     */
+    xqc_bool_t                  is_interop_mode;
+
+#ifdef XQC_PROTECT_POOL_MEM
+    uint8_t                     protect_pool_mem;
+#endif
+
+    char                        conn_option_str[XQC_CO_STR_MAX_LEN];
+
+    /**
+     * @brief intial_rtt (us). Default: 0 (use the internal default value -- 250000)
+     * 
+     */
+    xqc_usec_t                  initial_rtt;
+    /**
+     * @brief initial pto duration (us). Default: 0 (use the internal default value -- 3xinitial_rtt)
+     * 
+     */
+    xqc_usec_t                  initial_pto_duration;
+    
+    /** 
+     * fec option:
+     * 0: don't support fec
+     * 1: supports fec 
+     */
+    uint64_t                    enable_encode_fec;
+    uint64_t                    enable_decode_fec;
+    xqc_fec_params_t            fec_params;
+    xqc_fec_code_callback_t     fec_callback;
+    xqc_fec_code_callback_t     fec_encode_callback;
+    xqc_fec_code_callback_t     fec_decode_callback;
+
+    xqc_dgram_red_setting_e     close_dgram_redundancy;
+
+    /**
+     * @brief disable batch sending on the connection (default:0, not disable)
+     */
+    uint8_t                     disable_send_mmsg;
+
+    /**
+     * @brief control PTO value
+     */
+    uint8_t                     control_pto_value;
 
 } xqc_conn_settings_t;
 
 
 typedef enum {
-    XQC_0RTT_NONE,      /* without 0-RTT */
-    XQC_0RTT_ACCEPT,    /* 0-RTT was accepted */
-    XQC_0RTT_REJECT,    /* 0-RTT was rejected */
+    /** without 0-RTT */
+    XQC_0RTT_NONE       = 0,    
+    /** 0-RTT was accepted */  
+    XQC_0RTT_ACCEPT     = 1,   
+    /** 0-RTT was rejected */
+    XQC_0RTT_REJECT     = 2,   
 } xqc_0rtt_flag_t;
 
 
@@ -1275,18 +1472,27 @@ typedef struct xqc_path_metrics_s {
     uint64_t            path_recv_reinject_bytes;
     uint64_t            path_recv_effective_bytes;
     uint64_t            path_recv_effective_reinject_bytes;
+
+    uint64_t            path_srtt;
+    uint8_t             path_app_status;
 } xqc_path_metrics_t;
 
-
+/**
+ * @brief connection stats
+ */
 typedef struct xqc_conn_stats_s {
     uint32_t            send_count;
     uint32_t            lost_count;
     uint32_t            tlp_count;
     uint32_t            spurious_loss_count;
-    uint32_t            lost_dgram_count; /*how many datagram frames (pkts) are lost*/
-    xqc_usec_t          srtt;            /* smoothed SRTT at present: initial value = 250000 */
-    xqc_usec_t          min_rtt;         /* minimum RTT until now: initial value = 0xFFFFFFFF */
-    uint64_t            inflight_bytes;  /* initial value = 0 */
+    /** how many datagram frames (pkts) are lost */
+    uint32_t            lost_dgram_count; 
+    /** smoothed SRTT at present: initial value = 250000 */
+    xqc_usec_t          srtt; 
+    /** minimum RTT until now: initial value = 0xFFFFFFFF */
+    xqc_usec_t          min_rtt;
+    /** initial value = 0 */
+    uint64_t            inflight_bytes; 
     xqc_0rtt_flag_t     early_data_flag;
     uint32_t            recv_count;
     int                 spurious_loss_detect_on;
@@ -1309,19 +1515,30 @@ typedef struct xqc_conn_stats_s {
      */
     int                 mp_state;
 
+    int                 total_rebind_count;
+    int                 total_rebind_valid;
+
     xqc_path_metrics_t  paths_info[XQC_MAX_PATHS_COUNT];
     char                conn_info[XQC_CONN_INFO_LEN];
 
     char                alpn[XQC_MAX_ALPN_BUF_LEN];
+
+    uint32_t            send_fec_cnt;
+
+    uint8_t             enable_fec;
+    /** only accounts for stream and datagram packets */
+    uint64_t            total_app_bytes;
+    uint64_t            standby_path_app_bytes;
 } xqc_conn_stats_t;
 
-typedef struct xqc_path_stats_s {
-    uint8_t             get_stats_success;
-    xqc_usec_t          last_tra_path_status_changed_time;
-    uint32_t            send_count_since_last_tra_path_status_changed;
-    uint32_t            pto_count_since_last_tra_path_status_changed;
-} xqc_path_stats_t;
-
+typedef struct xqc_conn_qos_stats_s {
+    /** smoothed SRTT at present: initial value = 250000 */
+    xqc_usec_t          srtt; 
+    /** minimum RTT until now: initial value = 0xFFFFFFFF */ 
+    xqc_usec_t          min_rtt;
+    /** initial value = 0 */
+    uint64_t            inflight_bytes;
+} xqc_conn_qos_stats_t;
 
 /*************************************************************
  *  engine layer APIs
@@ -1347,7 +1564,7 @@ xqc_engine_t *xqc_engine_create(xqc_engine_type_t engine_type,
 
 
 /**
- * @brief destroy engine. this is called after all connections are destroyed
+ * @brief destroy engine. this is called after all connections are destroyed \n
  * NOTICE: MUST NOT be called in any xquic callback functions, for this function will destroy engine
  * immediately, result in segmentation fault.
  */
@@ -1364,11 +1581,12 @@ void xqc_engine_destroy(xqc_engine_t *engine);
  * @param alpn Application-Layer-Protocol, for example, h3, hq-interop, or self-defined
  * @param alpn_len length of Application-Layer-Protocol string
  * @param ap_cbs connection and stream event callback functions for application-layer-protocol
+ * @param alp_ctx the context of the upper layer protocol (e.g. the callback functions and default settings of the upper layer protocol)
  * @return XQC_EXPORT_PUBLIC_API
  */
 XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_engine_register_alpn(xqc_engine_t *engine, const char *alpn, size_t alpn_len,
-    xqc_app_proto_callbacks_t *ap_cbs);
+    xqc_app_proto_callbacks_t *ap_cbs, void *alp_ctx);
 
 
 /**
@@ -1382,6 +1600,35 @@ xqc_int_t xqc_engine_register_alpn(xqc_engine_t *engine, const char *alpn, size_
 XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_engine_unregister_alpn(xqc_engine_t *engine, const char *alpn, size_t alpn_len);
 
+/**
+ * @brief get the context an application layer protocol
+ * 
+ * @param engine engine handler
+ * @param alpn Application-Layer-Protocol, for example, h3, hq-interop, or self-defined
+ * @param alpn_len length of alpn
+ * @return the context
+ */
+XQC_EXPORT_PUBLIC_API
+void* xqc_engine_get_alpn_ctx(xqc_engine_t *engine, const char *alpn, size_t alpn_len);
+
+/**
+ * @brief get the private context
+ * 
+ * @param engine 
+ * @return XQC_EXPORT_PUBLIC_API* 
+ */
+XQC_EXPORT_PUBLIC_API
+void* xqc_engine_get_priv_ctx(xqc_engine_t *engine);
+
+/**
+ * @brief save the private context
+ * 
+ * @param engine 
+ * @param priv_ctx 
+ * @return XQC_EXPORT_PUBLIC_API 
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_engine_set_priv_ctx(xqc_engine_t *engine, void *priv_ctx);
 
 /**
  * Pass received UDP packet payload into xquic engine.
@@ -1424,7 +1671,7 @@ xqc_int_t xqc_engine_set_config(xqc_engine_t *engine, const xqc_config_t *engine
  * new created connections
  */
 XQC_EXPORT_PUBLIC_API
-void xqc_server_set_conn_settings(const xqc_conn_settings_t *settings);
+void xqc_server_set_conn_settings(xqc_engine_t *engine, const xqc_conn_settings_t *settings);
 
 
 /**
@@ -1438,11 +1685,12 @@ void xqc_engine_set_log_level(xqc_engine_t *engine, xqc_log_level_t log_level);
 
 /**
  * @brief enable/disable the log module of xquic
+ * @note  This function is not thread-safe. 
  *
- * @param enable XQC_TRUE for enable, XQC_FALSE for disable
+ * @param enable XQC_TRUE for disable, XQC_FALSE for enable
  */
 XQC_EXPORT_PUBLIC_API
-void xqc_log_enable(xqc_bool_t enable);
+void xqc_log_disable(xqc_bool_t disable);
 
 
 /**
@@ -1451,6 +1699,17 @@ void xqc_log_enable(xqc_bool_t enable);
  */
 XQC_EXPORT_PUBLIC_API
 void xqc_engine_finish_recv(xqc_engine_t *engine);
+
+
+/**
+ * @brief only useful for manually triggered send mode
+ * 
+ * @param engine 
+ * @return XQC_EXPORT_PUBLIC_API 
+ */
+XQC_EXPORT_PUBLIC_API
+void xqc_engine_finish_send(xqc_engine_t *engine);
+
 
 XQC_EXPORT_PUBLIC_API
 xqc_connection_t *xqc_engine_get_conn_by_scid(xqc_engine_t *engine,
@@ -1466,11 +1725,11 @@ xqc_connection_t *xqc_engine_get_conn_by_scid(xqc_engine_t *engine,
  * @param token token receive from server, xqc_save_token_pt callback
  * @param token_len
  * @param server_host server domain
- * @param no_crypto_flag 1: without encryption on 0-RTT and 1-RTT packets. this flag will add
- * no_crypto transport parameter when initiating a connection, which is not an official parameter
+ * @param no_crypto_flag 1: stop encrypt 0-RTT and 1-RTT packets. \n
+ * This flag will add no_crypto transport parameter when initiating a connection, which is not an official parameter
  * and might be modified or removed
  * @param conn_ssl_config For handshake
- * @param user_data For connection
+ * @param user_data application data, for connection usage
  * @param peer_addr address of peer
  * @param peer_addrlen length of peer_addr
  * @param alpn Application-Layer-Protocol, MUST NOT be NULL
@@ -1566,7 +1825,7 @@ XQC_EXPORT_PUBLIC_API
 xqc_bool_t xqc_conn_is_ready_to_send_early_data(xqc_connection_t *conn);
 
 /**
- * @brief set the packet filter callback function, and replace write_socket.
+ * @brief set the packet filter callback function, and replace write_socket. \n
  * NOTICE: this function is not conflict with send_mmsg.
  */
 XQC_EXPORT_PUBLIC_API
@@ -1610,11 +1869,12 @@ void xqc_conn_set_public_remote_trans_settings(xqc_connection_t *conn,
 
 
 /**
- * Create new stream in quic connection.
+ * @brief Create new stream in quic connection.
  * @param user_data  user_data for this stream
  */
 XQC_EXPORT_PUBLIC_API
-xqc_stream_t *xqc_stream_create(xqc_engine_t *engine, const xqc_cid_t *cid, void *user_data);
+xqc_stream_t *xqc_stream_create(xqc_engine_t *engine, 
+    const xqc_cid_t *cid, xqc_stream_settings_t *settings, void *user_data);
 
 XQC_EXPORT_PUBLIC_API
 xqc_stream_t *xqc_stream_create_with_direction(xqc_connection_t *conn,
@@ -1628,6 +1888,11 @@ xqc_stream_direction_t xqc_stream_get_direction(xqc_stream_t *strm);
  */
 XQC_EXPORT_PUBLIC_API
 void xqc_stream_set_user_data(xqc_stream_t *stream, void *user_data);
+
+
+XQC_EXPORT_PUBLIC_API
+xqc_int_t xqc_stream_update_settings(xqc_stream_t *stream, 
+    xqc_stream_settings_t *settings);
 
 /**
  * Get connection's user_data by stream
@@ -1674,12 +1939,12 @@ ssize_t xqc_stream_send(xqc_stream_t *stream, unsigned char *send_data, size_t s
 
 /**
  * @brief the API to get the max length of the data that can be sent 
- *        via a single call of xqc_datagram_send; NOTE, if the DCID length could
- *        be changed during the lifetime of the connection, applications is 
- *        suggested to call xqc_datagram_get_mss every time before 
- *        send datagram data or when getting -XQC_EDGRAM_TOO_LARGE error 
- *        from sending datagram data. In MPQUIC cases, the DCID of all paths 
- *        MUST be the same. Otherwise, there might be unexpected errors.
+ *        via a single call of xqc_datagram_send;
+ * 
+ * NOTE: if the DCID length could be changed during the lifetime of the connection, applications is 
+ * suggested to call xqc_datagram_get_mss every time before send datagram data or when 
+ * getting -XQC_EDGRAM_TOO_LARGE error from sending datagram data. In MPQUIC cases, 
+ * the DCID of all paths MUST be the same. Otherwise, there might be unexpected errors.
  * 
  * @param conn the connection handle 
  * @return 0 = the peer does not support datagram, >0 = the max length
@@ -1754,17 +2019,16 @@ xqc_int_t xqc_cid_is_equal(const xqc_cid_t *dst, const xqc_cid_t *src);
  * @return user should copy return buffer to your own memory if you will access in the future
  */
 XQC_EXPORT_PUBLIC_API
-unsigned char *xqc_scid_str(const xqc_cid_t *scid);
+unsigned char *xqc_scid_str(xqc_engine_t *engine, const xqc_cid_t *scid);
 
 XQC_EXPORT_PUBLIC_API
-unsigned char *xqc_dcid_str(const xqc_cid_t *dcid);
+unsigned char *xqc_dcid_str(xqc_engine_t *engine, const xqc_cid_t *dcid);
 
 XQC_EXPORT_PUBLIC_API
 unsigned char *xqc_dcid_str_by_scid(xqc_engine_t *engine, const xqc_cid_t *scid);
 
 XQC_EXPORT_PUBLIC_API
 uint8_t xqc_engine_config_get_cid_len(xqc_engine_t *engine);
-
 
 /**
  * User should call xqc_conn_continue_send when write event ready
@@ -1784,15 +2048,24 @@ void xqc_conn_continue_send_by_conn(xqc_connection_t *conn);
 XQC_EXPORT_PUBLIC_API
 xqc_conn_stats_t xqc_conn_get_stats(xqc_engine_t *engine, const xqc_cid_t *cid);
 
+
+/**
+ * User can get xqc_conn_qos_stats_t by cid
+ */
+XQC_EXPORT_PUBLIC_API
+xqc_conn_qos_stats_t xqc_conn_get_qos_stats(xqc_engine_t *engine, const xqc_cid_t *cid);
+
 /**
  * create new path for client
  * @param cid scid for connection
  * @param new_path_id if new path is created successfully, return new_path_id in this param
+ * @param path_status the initial status of the new path (1 = STANDBY, other values = AVAILABLE)
  * @return XQC_OK (0) when success, <0 for error
  */
 XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_conn_create_path(xqc_engine_t *engine,
-    const xqc_cid_t *cid, uint64_t *new_path_id);
+    const xqc_cid_t *cid, uint64_t *new_path_id,
+    int path_status);
 
 
 /**
@@ -1836,6 +2109,15 @@ XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_conn_mark_path_frozen(xqc_engine_t *engine, const xqc_cid_t *cid, uint64_t path_id);
 
 
+/**
+ * Calculate how many available paths on the current connection, i.e., paths which finished validation and is marked "available" status.
+ * @param engine xquic engine ctx
+ * @param cid scid for connection
+ * @return number of available paths when success, <0 for error
+ */
+XQC_EXPORT_PUBLIC_API xqc_int_t xqc_conn_available_paths(xqc_engine_t *engine, const xqc_cid_t *cid);
+
+
 XQC_EXPORT_PUBLIC_API
 xqc_conn_type_t xqc_conn_get_type(xqc_connection_t *conn);
 
@@ -1857,12 +2139,7 @@ XQC_EXPORT_PUBLIC_API
 xqc_int_t xqc_path_get_local_addr(xqc_connection_t *conn, uint64_t path_id,
     struct sockaddr *addr, socklen_t addr_cap, socklen_t *local_addr_len);
 
-/**
- * User can get xqc_path_stats_t by path_id
- */
-XQC_EXPORT_PUBLIC_API
-xqc_path_stats_t xqc_path_get_stats(xqc_engine_t *engine, const xqc_cid_t *cid,
-    uint64_t path_id);
+    
 
 /**
  * @brief load balance cid encryption.

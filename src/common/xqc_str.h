@@ -9,15 +9,15 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <time.h>
-#ifndef WIN32
-#include <sys/resource.h>
-#endif
 #include <stddef.h>
 #include <sys/types.h>
 
+#include <include/xquic/xquic_typedef.h>
 #include "src/common/xqc_config.h"
-#include "include/xquic/xquic_typedef.h"
 
+#ifndef  XQC_SYS_WINDOWS
+#include <sys/resource.h>
+#endif
 
 typedef struct xqc_str_s {
     size_t          len;
@@ -93,6 +93,17 @@ inline static xqc_bool_t
 xqc_memeq(const void *s1, const void *s2, size_t n)
 {
     return n == 0 || memcmp(s1, s2, n) == 0;
+}
+
+inline static xqc_bool_t
+xqc_char_is_letter_or_number(char c)
+{
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') 
+        || (c >= '0' && c <= '9'))
+    {
+        return XQC_TRUE;
+    }
+    return XQC_FALSE;
 }
 
 

@@ -116,7 +116,7 @@ xqc_send_queue_get_packet_out(xqc_send_queue_t *send_queue, unsigned need, xqc_p
     xqc_list_for_each_reverse(pos, &send_queue->sndq_send_packets) {
         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
         if (packet_out->po_pkt.pkt_type == pkt_type 
-            && packet_out->po_buf_size >= packet_out->po_used_size + need)
+            && xqc_get_po_remained_size(packet_out) >= need)
         {
             return packet_out;
         }
@@ -140,11 +140,13 @@ xqc_send_queue_get_packet_out_for_stream(xqc_send_queue_t *send_queue, unsigned 
     xqc_list_for_each_reverse(pos, &send_queue->sndq_send_packets) {
         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
         if (packet_out->po_pkt.pkt_type == pkt_type
-            && packet_out->po_buf_size >= packet_out->po_used_size + need
+            && xqc_get_po_remained_size(packet_out) >= need
             && packet_out->po_stream_frames_idx < XQC_MAX_STREAM_FRAME_IN_PO
             && packet_out->po_stream_frames_idx > 0
             /* Avoid Head-of-Line blocking. */
-            && packet_out->po_stream_frames[packet_out->po_stream_frames_idx - 1].ps_stream_id == stream->stream_id)
+            && packet_out->po_stream_frames[packet_out->po_stream_frames_idx - 1].ps_stream_id == stream->stream_id
+            && !(packet_out->po_frame_types & XQC_FRAME_BIT_SID)
+            && !(packet_out->po_frame_types & XQC_FRAME_BIT_REPAIR_SYMBOL))
         {
             return packet_out;
         }
@@ -203,7 +205,7 @@ xqc_send_queue_insert_send(xqc_packet_out_t *po, xqc_list_head_t *head, xqc_send
 {
     xqc_list_add_tail(&po->po_list, head);
     send_queue->sndq_packets_used++;
- }
+}
 
 void
 xqc_send_queue_remove_send(xqc_list_head_t *pos)
@@ -336,7 +338,7 @@ xqc_send_queue_move_to_high_pri(xqc_list_head_t *pos, xqc_send_queue_t *send_que
 
 
 void
-xqc_send_queue_copy_to_lost(xqc_packet_out_t *packet_out, xqc_send_queue_t *send_queue)
+xqc_send_queue_copy_to_lost(xqc_packet_out_t *packet_out, xqc_send_queue_t *send_queue, xqc_bool_t mark_retrans)
 {
     xqc_connection_t *conn = send_queue->sndq_conn;
 
@@ -355,7 +357,11 @@ xqc_send_queue_copy_to_lost(xqc_packet_out_t *packet_out, xqc_send_queue_t *send
 
     xqc_send_queue_insert_lost(&new_po->po_list, &send_queue->sndq_lost_packets);
     send_queue->sndq_packets_used++;
-    packet_out->po_flag |= XQC_POF_RETRANSED;
+    if (mark_retrans) {
+        packet_out->po_flag |= XQC_POF_RETRANSED;
+    }
+    new_po->po_flag &= ~XQC_POF_RETRANSED;
+    new_po->po_flag &= ~XQC_POF_SPURIOUS_LOSS;
 }
 
 void
@@ -378,6 +384,8 @@ xqc_send_queue_copy_to_probe(xqc_packet_out_t *packet_out, xqc_send_queue_t *sen
     xqc_send_queue_insert_probe(&new_po->po_list, &send_queue->sndq_pto_probe_packets);
     send_queue->sndq_packets_used++;
     packet_out->po_flag |= XQC_POF_RETRANSED;
+    new_po->po_flag &= ~XQC_POF_RETRANSED;
+    new_po->po_flag &= ~XQC_POF_SPURIOUS_LOSS;
 }
 
 /* Called when conn is ready to close */
@@ -502,7 +510,7 @@ xqc_send_queue_drop_packets_from_list_with_type(xqc_send_ctl_t *send_ctl, xqc_se
         xqc_log(send_ctl->ctl_conn->log, XQC_LOG_DEBUG, "|drop pkt from %s list|inflight:%ud|cwnd:%ui|"
                 "pkt_num:%ui|ptype:%d|frames:%s|len:%ud|", list_name, send_ctl->ctl_bytes_in_flight,
                 send_ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(send_ctl->ctl_cong), packet_out->po_pkt.pkt_num, 
-                packet_out->po_pkt.pkt_type, xqc_frame_type_2_str(packet_out->po_frame_types),
+                packet_out->po_pkt.pkt_type, xqc_frame_type_2_str(send_ctl->ctl_conn->engine, packet_out->po_frame_types),
                 packet_out->po_used_size);
         }
     }
@@ -528,10 +536,10 @@ xqc_send_queue_drop_packets_with_type(xqc_send_ctl_t *send_ctl, xqc_send_queue_t
         xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
 
 
-        xqc_log(send_ctl->ctl_conn->log, XQC_LOG_DEBUG, "|drop pkt from unacked|inflight:%ui|cwnd:%ui|"
+        xqc_log(send_ctl->ctl_conn->log, XQC_LOG_DEBUG, "|drop pkt from unacked|inflight:%ud|cwnd:%ui|"
                 "pkt_num:%ui|ptype:%d|frames:%s|", send_ctl->ctl_bytes_in_flight, 
             send_ctl->ctl_cong_callback->xqc_cong_ctl_get_cwnd(send_ctl->ctl_cong), packet_out->po_pkt.pkt_num, 
-            packet_out->po_pkt.pkt_type, xqc_frame_type_2_str(packet_out->po_frame_types));
+            packet_out->po_pkt.pkt_type, xqc_frame_type_2_str(send_ctl->ctl_conn->engine, packet_out->po_frame_types));
     }
 
     xqc_send_queue_drop_packets_from_list_with_type(send_ctl, send_queue, type, &send_queue->sndq_send_packets_high_pri, "high_pri", XQC_FALSE);
@@ -575,7 +583,19 @@ int
 xqc_send_ctl_stream_frame_can_drop(xqc_packet_out_t *packet_out, xqc_stream_id_t stream_id)
 {
     int drop = 0;
-    if (packet_out->po_frame_types == XQC_FRAME_BIT_STREAM) {
+    /* 
+     * Attached ACK could lead to a situation
+     * where an original packet (w/o ACK) can be removed but the corresponding 
+     * replicated packet (w/ ACK) cannot be removed. This 
+     * ultimately causes that the po_origin of the replicated packet (R) points to a new 
+     * packet (N) to which the buffer of the original packet is reallocated. This is
+     * very rare but may lead to a infinite loop or crash when the unacked list 
+     * in xqc_send_ctl_detect_lost is traversed. For example, when N is next to R in the unacked list,
+     * removing R may also free N via xqc_send_ctl_indirectly_ack_or_drop_po. If that
+     * happens, an infinite loop that traversing the free_packets list is triggered.
+     */
+    uint64_t mask = ~(XQC_FRAME_BIT_STREAM | XQC_FRAME_BIT_ACK | XQC_FRAME_BIT_ACK_MP | XQC_FRAME_BIT_SID);
+    if ((packet_out->po_frame_types & mask) == 0) {
         drop = 0;
         for (int i = 0; i < XQC_MAX_STREAM_FRAME_IN_PO; i++) {
             if (packet_out->po_stream_frames[i].ps_is_used == 0) {
@@ -612,50 +632,42 @@ xqc_send_queue_drop_stream_frame_packets(xqc_connection_t *conn, xqc_stream_id_t
 
     xqc_list_for_each_safe(pos, next, &send_queue->sndq_unacked_packets[XQC_PNS_APP_DATA]) {
         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
-        if (packet_out->po_frame_types == XQC_FRAME_BIT_STREAM) {
-            drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
-            if (drop) {
-                count++;
-                xqc_send_ctl_decrease_inflight(conn, packet_out);
-                xqc_send_queue_remove_unacked(packet_out, send_queue);
-                xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
-            }
+        drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
+        if (drop) {
+            count++;
+            xqc_send_ctl_decrease_inflight(conn, packet_out);
+            xqc_send_queue_remove_unacked(packet_out, send_queue);
+            xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
         }
     }
 
     xqc_list_for_each_safe(pos, next, &send_queue->sndq_send_packets) {
         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
-        if (packet_out->po_frame_types == XQC_FRAME_BIT_STREAM) {
-            drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
-            if (drop) {
-                count++;
-                xqc_send_queue_remove_send(pos);
-                xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
-            }
+        drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
+        if (drop) {
+            count++;
+            xqc_send_queue_remove_send(pos);
+            xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
         }
     }
 
     xqc_list_for_each_safe(pos, next, &send_queue->sndq_lost_packets) {
         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
-        if (packet_out->po_frame_types == XQC_FRAME_BIT_STREAM) {
-            drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
-            if (drop) {
-                count++;
-                xqc_send_queue_remove_lost(pos);
-                xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
-            }
+        drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
+        if (drop) {
+            count++;
+            xqc_send_queue_remove_lost(pos);
+            xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
         }
     }
 
     xqc_list_for_each_safe(pos, next, &send_queue->sndq_pto_probe_packets) {
         packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
-        if (packet_out->po_frame_types == XQC_FRAME_BIT_STREAM) {
-            drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
-            if (drop) {
-                count++;
-                xqc_send_queue_remove_probe(pos);
-                xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
-            }
+        drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
+        if (drop) {
+            count++;
+            xqc_send_queue_remove_probe(pos);
+            xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
         }
     }
 
@@ -666,37 +678,31 @@ xqc_send_queue_drop_stream_frame_packets(xqc_connection_t *conn, xqc_stream_id_t
 
         xqc_list_for_each_safe(pos, next, &path->path_schedule_buf[XQC_SEND_TYPE_NORMAL]) {
             packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
-            if (packet_out->po_frame_types == XQC_FRAME_BIT_STREAM) {
-                drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
-                if (drop) {
-                    count++;
-                    xqc_path_send_buffer_remove(path, packet_out);
-                    xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
-                }
+            drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
+            if (drop) {
+                count++;
+                xqc_path_send_buffer_remove(path, packet_out);
+                xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
             }
         }
 
         xqc_list_for_each_safe(pos, next, &path->path_schedule_buf[XQC_SEND_TYPE_RETRANS]) {
             packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
-            if (packet_out->po_frame_types == XQC_FRAME_BIT_STREAM) {
-                drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
-                if (drop) {
-                    count++;
-                    xqc_path_send_buffer_remove(path, packet_out);
-                    xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
-                }
+            drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
+            if (drop) {
+                count++;
+                xqc_path_send_buffer_remove(path, packet_out);
+                xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
             }
         }
 
         xqc_list_for_each_safe(pos, next, &path->path_schedule_buf[XQC_SEND_TYPE_PTO_PROBE]) {
             packet_out = xqc_list_entry(pos, xqc_packet_out_t, po_list);
-            if (packet_out->po_frame_types == XQC_FRAME_BIT_STREAM) {
-                drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
-                if (drop) {
-                    count++;
-                    xqc_path_send_buffer_remove(path, packet_out);
-                    xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
-                }
+            drop = xqc_send_ctl_stream_frame_can_drop(packet_out, stream_id);
+            if (drop) {
+                count++;
+                xqc_path_send_buffer_remove(path, packet_out);
+                xqc_send_queue_insert_free(packet_out, &send_queue->sndq_free_packets, send_queue);
             }
         }
     }

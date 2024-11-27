@@ -19,11 +19,16 @@
 #include "src/transport/xqc_transport_params.h"
 #include "src/transport/xqc_timer.h"
 #include "src/transport/xqc_multipath.h"
+#include "src/transport/xqc_fec.h"
+#include "src/transport/xqc_fec_scheme.h"
 #include "src/tls/xqc_tls.h"
 #include "src/common/xqc_list.h"
 
 #define XQC_MAX_DATAGRAM_REDUNDANCY 2
 #define XQC_MIN_DATAGRAM_REDUNDANT_PROBE_INTERVAL 30000 /* 30ms min probing interval */
+#define XQC_FC_INIT_RTT 60000
+#define XQC_MIN_RECV_WINDOW (63000) /* ~ 1MBps when RTT = 60ms */
+#define XQC_MIN_STANDBY_RPOBE_TIMEOUT 500 /* 500ms */
 
 #define XQC_TOKEN_EXPIRE_DELTA (7 * 24 * 60 * 60)           /* expire in N seconds */
 #define XQC_TOKEN_UPDATE_DELTA (XQC_TOKEN_EXPIRE_DELTA / 2) /* early update */
@@ -32,6 +37,8 @@
 #define XQC_MAX_PACKET_PROCESS_BATCH 100
 
 #define XQC_MAX_RECV_WINDOW (16 * 1024 * 1024)
+
+#define XQC_MP_SETTINGS_STR_LEN (30)
 
 static const uint32_t MAX_RSP_CONN_CLOSE_CNT = 3;
 
@@ -59,81 +66,77 @@ static const uint32_t MAX_RSP_CONN_CLOSE_CNT = 3;
     }                                               \
 } while(0)                                          \
 
-extern xqc_conn_settings_t default_conn_settings;
+extern xqc_conn_settings_t internal_default_conn_settings;
 extern const xqc_tls_callbacks_t xqc_conn_tls_cbs;
 
 /* !!WARNING: to add state, please update conn_state_2_str */
 typedef enum {
     /* server */
     XQC_CONN_STATE_SERVER_INIT = 0,
-    XQC_CONN_STATE_SERVER_INITIAL_RECVD,
-    XQC_CONN_STATE_SERVER_INITIAL_SENT,
-    XQC_CONN_STATE_SERVER_HANDSHAKE_SENT,
-    XQC_CONN_STATE_SERVER_HANDSHAKE_RECVD,
+    XQC_CONN_STATE_SERVER_INITIAL_RECVD = 1,
+    XQC_CONN_STATE_SERVER_INITIAL_SENT = 2,
+    XQC_CONN_STATE_SERVER_HANDSHAKE_SENT = 3,
+    XQC_CONN_STATE_SERVER_HANDSHAKE_RECVD = 4,
     /* client */
     XQC_CONN_STATE_CLIENT_INIT = 5,
-    XQC_CONN_STATE_CLIENT_INITIAL_SENT,
-    XQC_CONN_STATE_CLIENT_INITIAL_RECVD,
-    XQC_CONN_STATE_CLIENT_HANDSHAKE_RECVD,
-    XQC_CONN_STATE_CLIENT_HANDSHAKE_SENT,
+    XQC_CONN_STATE_CLIENT_INITIAL_SENT = 6,
+    XQC_CONN_STATE_CLIENT_INITIAL_RECVD = 7,
+    XQC_CONN_STATE_CLIENT_HANDSHAKE_RECVD = 8,
+    XQC_CONN_STATE_CLIENT_HANDSHAKE_SENT = 9,
     /* client & server */
     XQC_CONN_STATE_ESTABED = 10,
-    XQC_CONN_STATE_CLOSING,
-    XQC_CONN_STATE_DRAINING,
-    XQC_CONN_STATE_CLOSED,
-    XQC_CONN_STATE_N,
+    XQC_CONN_STATE_CLOSING = 11,
+    XQC_CONN_STATE_DRAINING = 12,
+    XQC_CONN_STATE_CLOSED = 13,
+    XQC_CONN_STATE_N = 14,
 } xqc_conn_state_t;
-
-#define XQC_CONN_FLAG_SHOULD_ACK (XQC_CONN_FLAG_SHOULD_ACK_INIT     \
-                                  | XQC_CONN_FLAG_SHOULD_ACK_HSK    \
-                                  | XQC_CONN_FLAG_SHOULD_ACK_01RTT) \
 
 #define XQC_CONN_IMMEDIATE_CLOSE_FLAGS (XQC_CONN_FLAG_ERROR)
 
 /* !!WARNING: to add flag, please update conn_flag_2_str */
 typedef enum {
-    XQC_CONN_FLAG_WAIT_WAKEUP_SHIFT,
-    XQC_CONN_FLAG_HANDSHAKE_COMPLETED_SHIFT,
-    XQC_CONN_FLAG_CAN_SEND_1RTT_SHIFT,
-    XQC_CONN_FLAG_TICKING_SHIFT,
-    XQC_CONN_FLAG_SHOULD_ACK_INIT_SHIFT,
-    XQC_CONN_FLAG_SHOULD_ACK_HSK_SHIFT      = (XQC_CONN_FLAG_SHOULD_ACK_INIT_SHIFT + XQC_PNS_HSK),
-    XQC_CONN_FLAG_SHOULD_ACK_01RTT_SHIFT    = (XQC_CONN_FLAG_SHOULD_ACK_INIT_SHIFT + XQC_PNS_APP_DATA),
-    XQC_CONN_FLAG_ACK_HAS_GAP_SHIFT,
-    XQC_CONN_FLAG_TIME_OUT_SHIFT,
-    XQC_CONN_FLAG_ERROR_SHIFT,
-    XQC_CONN_FLAG_DATA_BLOCKED_SHIFT,
-    XQC_CONN_FLAG_DCID_OK_SHIFT,
-    XQC_CONN_FLAG_TOKEN_OK_SHIFT,
-    XQC_CONN_FLAG_HAS_0RTT_SHIFT,
-    XQC_CONN_FLAG_0RTT_OK_SHIFT,
-    XQC_CONN_FLAG_0RTT_REJ_SHIFT,
-    XQC_CONN_FLAG_UPPER_CONN_EXIST_SHIFT,
-    XQC_CONN_FLAG_INIT_RECVD_SHIFT,
-    XQC_CONN_FLAG_NEED_RUN_SHIFT,
-    XQC_CONN_FLAG_PING_SHIFT,
-    XQC_CONN_FLAG_HSK_ACKED_SHIFT,
-    XQC_CONN_FLAG_RESERVE_SHIFT,
-    XQC_CONN_FLAG_HANDSHAKE_DONE_RECVD_SHIFT,
-    XQC_CONN_FLAG_UPDATE_NEW_TOKEN_SHIFT,
-    XQC_CONN_FLAG_VERSION_NEGOTIATION_SHIFT,
-    XQC_CONN_FLAG_HANDSHAKE_CONFIRMED_SHIFT,
-    XQC_CONN_FLAG_HANDSHAKE_DONE_ACKED_SHIFT,
-    XQC_CONN_FLAG_ADDR_VALIDATED_SHIFT,
-    XQC_CONN_FLAG_NEW_CID_RECEIVED_SHIFT,
-    XQC_CONN_FLAG_LINGER_CLOSING_SHIFT,
-    XQC_CONN_FLAG_RETRY_RECVD_SHIFT,
-    XQC_CONN_FLAG_TLS_HSK_COMPLETED_SHIFT,
-    XQC_CONN_FLAG_RECV_NEW_PATH_SHIFT,
-    XQC_CONN_FLAG_VALIDATE_REBINDING_SHIFT,
-    XQC_CONN_FLAG_CONN_CLOSING_NOTIFY_SHIFT,
-    XQC_CONN_FLAG_CONN_CLOSING_NOTIFIED_SHIFT,
-    XQC_CONN_FLAG_DGRAM_WAIT_FOR_1RTT_SHIFT,
-    XQC_CONN_FLAG_LOCAL_TP_UPDATED_SHIFT,
-    XQC_CONN_FLAG_PMTUD_PROBING_SHIFT,
-    XQC_CONN_FLAG_NO_DGRAM_NOTIFIED_SHIFT,
-    XQC_CONN_FLAG_DGRAM_MSS_NOTIFY_SHIFT,
-    XQC_CONN_FLAG_SHIFT_NUM,
+    XQC_CONN_FLAG_WAIT_WAKEUP_SHIFT = 0,
+    XQC_CONN_FLAG_HANDSHAKE_COMPLETED_SHIFT = 1,
+    XQC_CONN_FLAG_CAN_SEND_1RTT_SHIFT = 2,
+    XQC_CONN_FLAG_TICKING_SHIFT = 3,
+    XQC_CONN_FLAG_ACK_HAS_GAP_SHIFT = 4,
+    XQC_CONN_FLAG_TIME_OUT_SHIFT = 5,
+    XQC_CONN_FLAG_ERROR_SHIFT = 6,
+    XQC_CONN_FLAG_DATA_BLOCKED_SHIFT = 7,
+    XQC_CONN_FLAG_DCID_OK_SHIFT = 8,
+    XQC_CONN_FLAG_TOKEN_OK_SHIFT = 9,
+    XQC_CONN_FLAG_HAS_0RTT_SHIFT = 10,
+    XQC_CONN_FLAG_0RTT_OK_SHIFT = 11,
+    XQC_CONN_FLAG_0RTT_REJ_SHIFT = 12,
+    XQC_CONN_FLAG_UPPER_CONN_EXIST_SHIFT = 13,
+    XQC_CONN_FLAG_INIT_RECVD_SHIFT = 14,
+    XQC_CONN_FLAG_NEED_RUN_SHIFT = 15,
+    XQC_CONN_FLAG_PING_SHIFT = 16,
+    XQC_CONN_FLAG_HSK_ACKED_SHIFT = 17,
+    XQC_CONN_FLAG_RESERVE_SHIFT = 18,
+    XQC_CONN_FLAG_HANDSHAKE_DONE_RECVD_SHIFT = 19,
+    XQC_CONN_FLAG_UPDATE_NEW_TOKEN_SHIFT = 20,
+    XQC_CONN_FLAG_VERSION_NEGOTIATION_SHIFT = 21,
+    XQC_CONN_FLAG_HANDSHAKE_CONFIRMED_SHIFT = 22,
+    XQC_CONN_FLAG_HANDSHAKE_DONE_ACKED_SHIFT = 23,
+    XQC_CONN_FLAG_ADDR_VALIDATED_SHIFT = 24,
+    XQC_CONN_FLAG_LINGER_CLOSING_SHIFT = 25,
+    XQC_CONN_FLAG_RETRY_RECVD_SHIFT = 26,
+    XQC_CONN_FLAG_TLS_CH_SHIFT = 27,
+    XQC_CONN_FLAG_TLS_HSK_COMPLETED_SHIFT = 28,
+    XQC_CONN_FLAG_RECV_NEW_PATH_SHIFT = 29,
+    XQC_CONN_FLAG_VALIDATE_REBINDING_SHIFT = 30,
+    XQC_CONN_FLAG_CONN_CLOSING_NOTIFY_SHIFT = 31,
+    XQC_CONN_FLAG_CONN_CLOSING_NOTIFIED_SHIFT = 32,
+    XQC_CONN_FLAG_DGRAM_WAIT_FOR_1RTT_SHIFT = 33,
+    XQC_CONN_FLAG_LOCAL_TP_UPDATED_SHIFT = 34,
+    XQC_CONN_FLAG_PMTUD_PROBING_SHIFT = 35,
+    XQC_CONN_FLAG_NO_DGRAM_NOTIFIED_SHIFT = 36,
+    XQC_CONN_FLAG_DGRAM_MSS_NOTIFY_SHIFT = 37,
+    XQC_CONN_FLAG_MP_WAIT_MP_READY_SHIFT = 38,
+    XQC_CONN_FLAG_MP_READY_NOTIFY_SHIFT = 39,
+    XQC_CONN_FLAG_HANDSHAKE_DONE_SENT_SHIFT = 40,
+    XQC_CONN_FLAG_SHIFT_NUM = 41,
 } xqc_conn_flag_shift_t;
 
 typedef enum {
@@ -141,9 +144,6 @@ typedef enum {
     XQC_CONN_FLAG_HANDSHAKE_COMPLETED   = 1ULL << XQC_CONN_FLAG_HANDSHAKE_COMPLETED_SHIFT,
     XQC_CONN_FLAG_CAN_SEND_1RTT         = 1ULL << XQC_CONN_FLAG_CAN_SEND_1RTT_SHIFT,
     XQC_CONN_FLAG_TICKING               = 1ULL << XQC_CONN_FLAG_TICKING_SHIFT,
-    XQC_CONN_FLAG_SHOULD_ACK_INIT       = 1ULL << XQC_CONN_FLAG_SHOULD_ACK_INIT_SHIFT,
-    XQC_CONN_FLAG_SHOULD_ACK_HSK        = 1ULL << XQC_CONN_FLAG_SHOULD_ACK_HSK_SHIFT,
-    XQC_CONN_FLAG_SHOULD_ACK_01RTT      = 1ULL << XQC_CONN_FLAG_SHOULD_ACK_01RTT_SHIFT,
     XQC_CONN_FLAG_ACK_HAS_GAP           = 1ULL << XQC_CONN_FLAG_ACK_HAS_GAP_SHIFT,
     XQC_CONN_FLAG_TIME_OUT              = 1ULL << XQC_CONN_FLAG_TIME_OUT_SHIFT,
     XQC_CONN_FLAG_ERROR                 = 1ULL << XQC_CONN_FLAG_ERROR_SHIFT,
@@ -165,9 +165,9 @@ typedef enum {
     XQC_CONN_FLAG_HANDSHAKE_CONFIRMED   = 1ULL << XQC_CONN_FLAG_HANDSHAKE_CONFIRMED_SHIFT,
     XQC_CONN_FLAG_HANDSHAKE_DONE_ACKED  = 1ULL << XQC_CONN_FLAG_HANDSHAKE_DONE_ACKED_SHIFT,
     XQC_CONN_FLAG_ADDR_VALIDATED        = 1ULL << XQC_CONN_FLAG_ADDR_VALIDATED_SHIFT,
-    XQC_CONN_FLAG_NEW_CID_RECEIVED      = 1ULL << XQC_CONN_FLAG_NEW_CID_RECEIVED_SHIFT,
     XQC_CONN_FLAG_LINGER_CLOSING        = 1ULL << XQC_CONN_FLAG_LINGER_CLOSING_SHIFT,
     XQC_CONN_FLAG_RETRY_RECVD           = 1ULL << XQC_CONN_FLAG_RETRY_RECVD_SHIFT,
+    XQC_CONN_FLAG_TLS_CH_RECVD          = 1ULL << XQC_CONN_FLAG_TLS_CH_SHIFT,
     XQC_CONN_FLAG_TLS_HSK_COMPLETED     = 1ULL << XQC_CONN_FLAG_TLS_HSK_COMPLETED_SHIFT,
     XQC_CONN_FLAG_RECV_NEW_PATH         = 1ULL << XQC_CONN_FLAG_RECV_NEW_PATH_SHIFT,
     XQC_CONN_FLAG_VALIDATE_REBINDING    = 1ULL << XQC_CONN_FLAG_VALIDATE_REBINDING_SHIFT,
@@ -178,6 +178,9 @@ typedef enum {
     XQC_CONN_FLAG_PMTUD_PROBING         = 1ULL << XQC_CONN_FLAG_PMTUD_PROBING_SHIFT,
     XQC_CONN_FLAG_NO_DGRAM_NOTIFIED     = 1ULL << XQC_CONN_FLAG_NO_DGRAM_NOTIFIED_SHIFT,
     XQC_CONN_FLAG_DGRAM_MSS_NOTIFY      = 1ULL << XQC_CONN_FLAG_DGRAM_MSS_NOTIFY_SHIFT,
+    XQC_CONN_FLAG_MP_WAIT_MP_READY      = 1ULL << XQC_CONN_FLAG_MP_WAIT_MP_READY_SHIFT,
+    XQC_CONN_FLAG_MP_READY_NOTIFY       = 1ULL << XQC_CONN_FLAG_MP_READY_NOTIFY_SHIFT,
+    XQC_CONN_FLAG_HANDSHAKE_DONE_SENT   = 1ULL << XQC_CONN_FLAG_HANDSHAKE_DONE_SENT_SHIFT,
 
 } xqc_conn_flag_t;
 
@@ -200,9 +203,23 @@ typedef struct {
     uint64_t                active_connection_id_limit;
     uint64_t                no_crypto;
     uint64_t                enable_multipath;
+    xqc_multipath_version_t multipath_version;
     uint16_t                max_datagram_frame_size;
-} xqc_trans_settings_t;
+    uint32_t                conn_options[XQC_CO_MAX_NUM];
+    uint8_t                 conn_option_num;
 
+    xqc_fec_version_t       fec_version;
+    uint64_t                enable_encode_fec;
+    uint64_t                enable_decode_fec;
+    uint64_t                fec_max_symbols_num;
+    xqc_fec_schemes_e       fec_encoder_schemes[XQC_FEC_MAX_SCHEME_NUM];
+    xqc_fec_schemes_e       fec_decoder_schemes[XQC_FEC_MAX_SCHEME_NUM];
+    xqc_int_t               fec_encoder_schemes_num;
+    xqc_int_t               fec_decoder_schemes_num;
+    xqc_dgram_red_setting_e close_dgram_redundancy;
+    uint64_t                init_max_path_id;
+} xqc_trans_settings_t;
+ 
 
 typedef struct {
     /* flow control limit */
@@ -261,8 +278,8 @@ struct xqc_connection_s {
     /* initial source connection id, RFC 9000, Section 7.3 */
     xqc_cid_t                       initial_scid;
 
-    xqc_dcid_set_t                  dcid_set;
-    xqc_scid_set_t                  scid_set;
+    xqc_cid_set_t                   dcid_set;
+    xqc_cid_set_t                   scid_set;
 
     unsigned char                   peer_addr[sizeof(struct sockaddr_in6)];
     socklen_t                       peer_addrlen;
@@ -303,6 +320,9 @@ struct xqc_connection_s {
 
     xqc_trans_settings_t            local_settings;
     xqc_trans_settings_t            remote_settings;
+
+    /* a bitmap to record if ACKs should be generated for path[pns] */
+    uint64_t                        ack_flag;
     xqc_conn_flag_t                 conn_flag;
     xqc_conn_type_t                 conn_type;
 
@@ -311,6 +331,8 @@ struct xqc_connection_s {
     void                           *user_data;      /* user_data for application layer */
 
     /* callback function and user_data to application-layer-protocol layer */
+    char                           *alpn;
+    size_t                          alpn_len;
     xqc_app_proto_callbacks_t       app_proto_cbs;
     void                           *proto_data;
 
@@ -351,9 +373,16 @@ struct xqc_connection_s {
     uint32_t                        create_path_count;
     uint32_t                        validated_path_count;
     uint32_t                        active_path_count;
-    uint32_t                        in_use_active_path_count;
-    uint8_t                         switch_initial;
 
+    uint64_t                        curr_max_path_id;
+    uint64_t                        local_max_path_id;
+    uint64_t                        remote_max_path_id;
+
+    /* for qlog */
+    uint32_t                        MTU_updated_count;    
+    uint32_t                        packet_dropped_count;
+    
+    
     const
     xqc_scheduler_callback_t       *scheduler_callback;
     void                           *scheduler;
@@ -388,7 +417,13 @@ struct xqc_connection_s {
         uint32_t                    hp_red_dgram;
         uint32_t                    hp_red_dgram_mp;
         uint32_t                    timer_red_dgram;
-    } dgram_stats;            
+    } dgram_stats;
+
+    struct {
+        uint64_t                    send_bytes;
+        uint64_t                    reinjected_bytes;
+        uint64_t                    recv_bytes;
+    } stream_stats;         
 
     xqc_gp_timer_id_t               dgram_probe_timer;
     xqc_var_buf_t                  *last_dgram;
@@ -405,9 +440,49 @@ struct xqc_connection_s {
     /* cc blocking stats */
     uint32_t                        sched_cc_blocked;
     uint32_t                        send_cc_blocked;
+
+    /* internal loss detection stats */
+    uint32_t                        detected_loss_cnt;
+
+    /* max consecutive PTO cnt among all paths */
+    uint16_t                        max_pto_cnt;
+    uint32_t                        finished_streams;
+    uint32_t                        cli_bidi_streams;
+    uint32_t                        svr_bidi_streams;
+
+    /* for fec */
+    xqc_fec_ctl_t                  *fec_ctl;
+    uint32_t                        fec_neg_fail_reason;
+
+
+    /* receved pkts stats */
+    struct {
+        xqc_pkt_type_t              pkt_types[3];
+        xqc_frame_type_bit_t        pkt_frames[3];
+        uint32_t                    pkt_size[3];
+        uint32_t                    pkt_udp_size[3];
+        int                         pkt_err[3];
+        xqc_usec_t                  pkt_timestamp[3];
+        xqc_packet_number_t         pkt_pn[3];
+        uint8_t                     curr_index;
+        uint32_t                    conn_rcvd_pkts;
+        uint32_t                    conn_udp_pkts;
+    } rcv_pkt_stats;
+
+    struct {
+        xqc_pkt_type_t              pkt_types[3];
+        xqc_frame_type_bit_t        pkt_frames[3];
+        uint32_t                    pkt_size[3];
+        xqc_usec_t                  pkt_timestamp[3];
+        xqc_packet_number_t         pkt_pn[3];
+        uint8_t                     curr_index;
+        uint32_t                    conn_sent_pkts;
+    } snd_pkt_stats;
 };
 
-const char *xqc_conn_flag_2_str(xqc_conn_flag_t conn_flag);
+extern const xqc_h3_conn_settings_t default_local_h3_conn_settings;
+
+const char *xqc_conn_flag_2_str(xqc_connection_t *conn, xqc_conn_flag_t conn_flag);
 const char *xqc_conn_state_2_str(xqc_conn_state_t state);
 void xqc_conn_init_flow_ctl(xqc_connection_t *conn);
 
@@ -458,12 +533,13 @@ xqc_int_t xqc_conn_handshake_complete(xqc_connection_t *conn);
 xqc_int_t xqc_conn_buff_undecrypt_packet_in(xqc_packet_in_t *packet_in, xqc_connection_t *conn,
     xqc_encrypt_level_t encrypt_level);
 xqc_int_t xqc_conn_process_undecrypt_packet_in(xqc_connection_t *conn, xqc_encrypt_level_t encrypt_level);
+void xqc_conn_buff_1rtt_packet(xqc_connection_t *conn, xqc_packet_out_t *po);
 void xqc_conn_buff_1rtt_packets(xqc_connection_t *conn);
 void xqc_conn_write_buffed_1rtt_packets(xqc_connection_t *conn);
 xqc_usec_t xqc_conn_next_wakeup_time(xqc_connection_t *conn);
 
-char *xqc_local_addr_str(const struct sockaddr *local_addr, socklen_t local_addrlen);
-char *xqc_peer_addr_str(const struct sockaddr *peer_addr, socklen_t peer_addrlen);
+char *xqc_local_addr_str(xqc_engine_t *engine, const struct sockaddr *local_addr, socklen_t local_addrlen);
+char *xqc_peer_addr_str(xqc_engine_t *engine, const struct sockaddr *peer_addr, socklen_t peer_addrlen);
 char *xqc_conn_addr_str(xqc_connection_t *conn);
 char *xqc_path_addr_str(xqc_path_ctx_t *path);
 
@@ -500,32 +576,21 @@ xqc_conn_has_undecrypt_packets(xqc_connection_t *conn)
         || conn->undecrypt_count[XQC_ENC_LEV_HSK];
 }
 
-static inline xqc_int_t
-xqc_conn_should_ack(xqc_connection_t *conn)
-{
-    if (conn->conn_flag & XQC_CONN_FLAG_SHOULD_ACK) {
-        xqc_log(conn->log, XQC_LOG_DEBUG, "|should_generate_ack yes|flag:%s|",
-                xqc_conn_flag_2_str(conn->conn_flag));
-        return 1;
-    }
-    return 0;
-}
-
 /* process an UDP datagram */
 xqc_int_t xqc_conn_process_packet(xqc_connection_t *c, const unsigned char *packet_in_buf,
     size_t packet_in_size, xqc_usec_t recv_time);
 
-void xqc_conn_process_packet_recved_path(xqc_connection_t *conn, xqc_cid_t *scid,
+void xqc_conn_process_packet_recved_path(xqc_connection_t *conn, xqc_cid_t *scid, 
     size_t packet_in_size, xqc_usec_t recv_time);
 
 xqc_int_t xqc_conn_check_handshake_complete(xqc_connection_t *conn);
 
 
-xqc_int_t xqc_conn_check_unused_cids(xqc_connection_t *conn);
+xqc_int_t xqc_conn_get_available_path_id(xqc_connection_t *conn, uint64_t *path_id);
 xqc_int_t xqc_conn_try_add_new_conn_id(xqc_connection_t *conn, uint64_t retire_prior_to);
 xqc_int_t xqc_conn_check_dcid(xqc_connection_t *conn, xqc_cid_t *dcid);
 void xqc_conn_destroy_cids(xqc_connection_t *conn);
-xqc_int_t xqc_conn_update_user_scid(xqc_connection_t *conn, xqc_scid_set_t *scid_set);
+xqc_int_t xqc_conn_update_user_scid(xqc_connection_t *conn);
 xqc_int_t xqc_conn_set_cid_retired_ts(xqc_connection_t *conn, xqc_cid_inner_t *inner_cid);
 
 xqc_bool_t xqc_conn_peer_complete_address_validation(xqc_connection_t *c);
@@ -551,7 +616,8 @@ xqc_int_t xqc_conn_confirm_key_update(xqc_connection_t *conn);
 /* from send_ctl */
 void xqc_conn_decrease_unacked_stream_ref(xqc_connection_t *conn, xqc_packet_out_t *packet_out);
 void xqc_conn_increase_unacked_stream_ref(xqc_connection_t *conn, xqc_packet_out_t *packet_out);
-void xqc_conn_update_stream_stats_on_sent(xqc_connection_t *conn, xqc_packet_out_t *packet_out, xqc_usec_t now);
+void xqc_conn_update_stream_stats_on_sent(xqc_connection_t *conn, xqc_send_ctl_t *ctl, 
+    xqc_packet_out_t *packet_out, xqc_usec_t now);
 
 /* 选择所有path的PTO中最大的那个，作为conn的PTO，用于连接级别的定时器触发:
  * - XQC_TIMER_LINGER_CLOSE
@@ -561,10 +627,13 @@ void xqc_conn_update_stream_stats_on_sent(xqc_connection_t *conn, xqc_packet_out
  */
 xqc_usec_t xqc_conn_get_max_pto(xqc_connection_t *conn);
 
+uint32_t xqc_conn_get_max_pto_backoff(xqc_connection_t *conn, uint8_t available_only);
+
 void xqc_conn_ptmud_probing(xqc_connection_t *conn);
 
 /* 用于流控 */
-xqc_usec_t xqc_conn_get_min_srtt(xqc_connection_t *conn);
+xqc_usec_t xqc_conn_get_min_srtt(xqc_connection_t *conn, xqc_bool_t available_only);
+xqc_usec_t xqc_conn_get_max_srtt(xqc_connection_t *conn);
 
 void xqc_conn_check_app_limit(xqc_connection_t *conn);
 
@@ -594,6 +663,8 @@ xqc_int_t xqc_conn_gp_timer_get_info(xqc_connection_t *conn, xqc_gp_timer_id_t g
 
 void xqc_conn_schedule_packets_to_paths(xqc_connection_t *conn);
 
+void xqc_conn_encode_transport_state(xqc_connection_t *conn, char *buf, size_t buf_sz);
+
 static inline xqc_uint_t 
 xqc_conn_get_mss(xqc_connection_t *conn) {
     return conn->pkt_out_size + XQC_ACK_SPACE;
@@ -616,5 +687,14 @@ void xqc_conn_destroy_ping_record(xqc_ping_record_t *pr);
 void xqc_conn_destroy_ping_notification_list(xqc_connection_t *conn);
 
 xqc_int_t xqc_conn_send_ping_internal(xqc_connection_t *conn, void *ping_user_data, xqc_bool_t notify);
+
+void xqc_conn_encode_mp_settings(xqc_connection_t *conn, char *buf, size_t buf_sz);
+
+void xqc_path_send_packets(xqc_connection_t *conn, xqc_path_ctx_t *path,
+    xqc_list_head_t *head, int congest, xqc_send_type_t send_type);
+
+xqc_int_t xqc_conn_try_to_enable_multipath(xqc_connection_t *conn);
+xqc_int_t xqc_conn_add_path_cid_sets(xqc_connection_t *conn, uint32_t start, uint32_t end);
+
 
 #endif /* _XQC_CONN_H_INCLUDED_ */
