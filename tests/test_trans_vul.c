@@ -10,7 +10,7 @@ extern int g_conn_timeout;
 extern xqc_conn_settings_t *g_conn_settings;
 
 extern int g_conn_count;
-int g_transport;
+extern int g_transport;
 
 
 /* 
@@ -27,7 +27,7 @@ test_trans_stream_send(xqc_stream_t *stream, void *user_data)
     //xqc_stream_t *crypto_stream = stream;
     xqc_stream_t *crypto_stream = conn->crypto_stream[XQC_ENC_LEV_HSK];
     int i = 0, j = 0, len = 1000;
-    for (i = 0; i < 1000; i++) {
+    for (i = 0; i < 10000; i++) {
         xqc_hs_buffer_t *buf = xqc_malloc(sizeof(xqc_hs_buffer_t) + len);
         xqc_init_list_head(&buf->list_head);
         if (buf == NULL) {
@@ -40,7 +40,7 @@ test_trans_stream_send(xqc_stream_t *stream, void *user_data)
         }
  
         poc_crypto_stream_send(crypto_stream, buf, XQC_PTYPE_SHORT_HEADER); 
-        if (i % 1000 == 99) {
+        if (i % 1000 == 999) {
             printf("send crypto stream:%d\n", i);
         }
     }

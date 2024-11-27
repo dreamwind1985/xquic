@@ -73,6 +73,10 @@ typedef struct user_stream_s {
     FILE               *recv_body_fp;
     int                 recv_fin;
     xqc_msec_t          start_time;
+
+    xqc_h3_ext_bytestream_t *h3_ext_bs;
+    struct event            *ev_bytestream_timer;
+
 } user_stream_t;
 
 typedef struct client_ctx_s {
