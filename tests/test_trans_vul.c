@@ -26,6 +26,9 @@ test_trans_stream_send(xqc_stream_t *stream, void *user_data)
 
     //xqc_stream_t *crypto_stream = stream;
     xqc_stream_t *crypto_stream = conn->crypto_stream[XQC_ENC_LEV_HSK];
+    if (crypto_stream == NULL) {
+        return 0;
+    }
     int i = 0, j = 0, len = 1000;
     for (i = 0; i < 10000; i++) {
         xqc_hs_buffer_t *buf = xqc_malloc(sizeof(xqc_hs_buffer_t) + len);
@@ -48,6 +51,39 @@ test_trans_stream_send(xqc_stream_t *stream, void *user_data)
     sleep(1);
     return 0;
 }
+xqc_int_t
+test_trans_write_conn_id_frame_to_packet(xqc_connection_t *conn, uint64_t retire_prior_to)
+{
+    xqc_packet_out_t   *packet_out = NULL;
+    xqc_cid_t           conn_cid;
+    uint8_t             sr_token[XQC_STATELESS_RESET_TOKENLEN];
+    
+    return 0;
+}
+
+
+int
+test_trans_stream_send_1(xqc_stream_t *stream, void *user_data)
+{
+    user_stream_t *user_stream = (user_stream_t *) user_data;
+    user_conn_t *user_conn = user_stream->user_conn;
+    xqc_connection_t *conn = user_conn->quic_conn;
+
+    //xqc_stream_t *crypto_stream = stream;
+    //xqc_stream_t *crypto_stream = conn->crypto_stream[XQC_ENC_LEV_HSK];
+    /*
+    conn->scid_set.cid_set.unused_cnt = 0;
+    if (conn->scid_set.cid_set.used_cnt > 0) {
+        conn->scid_set.cid_set.used_cnt--;
+    }*/
+
+    xqc_int_t ret = xqc_write_new_conn_id_frame_to_packet(conn, 0);
+    if (ret != XQC_OK) {
+        xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_write_new_conn_id_frame_to_packet error|");
+        return ret;
+    }
+    return 0;    
+} 
 
 void
 test_trans_create_stream_callback(int fd, short what, void *arg)
