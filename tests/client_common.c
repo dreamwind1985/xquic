@@ -396,7 +396,7 @@ client_create_user_stream(xqc_engine_t * engine, user_conn_t *user_conn, xqc_cid
         return NULL;
     }
     if (user_conn->h3 == 0) {
-        user_stream->h3_request = xqc_h3_request_create(engine, cid, user_stream);
+        user_stream->h3_request = xqc_h3_request_create(engine, cid, NULL, user_stream);
         if (user_stream->h3_request == NULL) {
             return NULL;
         }
@@ -410,7 +410,7 @@ client_create_user_stream(xqc_engine_t * engine, user_conn_t *user_conn, xqc_cid
         //xqc_client_bytestream_send(user_stream->h3_ext_bs, user_stream);
 
     } else {
-        user_stream->stream = xqc_stream_create(engine, cid, user_stream);
+        user_stream->stream = xqc_stream_create(engine, cid, NULL, user_stream);
         if (user_stream->stream == NULL) {
             return NULL;
         }
@@ -552,7 +552,7 @@ client_conn_update_cid_notify(xqc_connection_t *conn, const xqc_cid_t *retire_ci
     memcpy(&user_conn->cid, new_cid, sizeof(*new_cid));
     //if (g_debug_flag) {
     client_ctx_t *ctx = user_conn->ctx;
-    printf("====>SCID:%s\n", xqc_scid_str(new_cid));
+    printf("====>SCID:%s\n", xqc_scid_str(ctx->engine, new_cid));
     printf("====>DCID:%s\n", xqc_dcid_str_by_scid(ctx->engine, new_cid));
     //}
 }

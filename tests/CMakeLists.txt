@@ -34,6 +34,11 @@ set(TEST_CLIENT_SOURCES
     test_client.c
     ${TEST_PLATFORM_SOURCES}
 )
+set(TEST_H3_CLIENT_SOURCES
+    test_h3_client.c
+    client_common.c
+    ${TEST_PLATFORM_SOURCES}
+)
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
     set(GETOPT_SOURCES
@@ -55,6 +60,8 @@ endif()
 ### test client/server ###
 add_executable(test_server ${TEST_SERVER_SOURCES})
 add_executable(test_client ${TEST_CLIENT_SOURCES})
+add_executable(test_h3_client ${TEST_H3_CLIENT_SOURCES})
+target_compile_definitions(test_h3_client PRIVATE -D_TEST_H3_CLIENT_)
 
 # link libraries
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
@@ -78,7 +85,7 @@ endif()
 
 target_link_libraries(test_server ${APP_DEPEND_LIBS})
 target_link_libraries(test_client ${APP_DEPEND_LIBS})
-
+target_link_libraries(test_h3_client ${APP_DEPEND_LIBS})
 
 # build run_tests
 if(HAVE_CUNIT)
