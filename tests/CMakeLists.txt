@@ -39,6 +39,12 @@ set(TEST_H3_CLIENT_SOURCES
     client_common.c
     ${TEST_PLATFORM_SOURCES}
 )
+set(TEST_PING_DDOS_SOURCES
+    test_ping_ddos.c
+    poc_common.c
+    client_common.c
+    ${TEST_PLATFORM_SOURCES}
+)
 
 if(${CMAKE_SYSTEM_NAME} MATCHES "Windows")
     set(GETOPT_SOURCES
@@ -62,6 +68,7 @@ add_executable(test_server ${TEST_SERVER_SOURCES})
 add_executable(test_client ${TEST_CLIENT_SOURCES})
 add_executable(test_h3_client ${TEST_H3_CLIENT_SOURCES})
 target_compile_definitions(test_h3_client PRIVATE -D_TEST_H3_CLIENT_)
+add_executable(test_ping_ddos ${TEST_PING_DDOS_SOURCES})
 
 # link libraries
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
@@ -86,6 +93,7 @@ endif()
 target_link_libraries(test_server ${APP_DEPEND_LIBS})
 target_link_libraries(test_client ${APP_DEPEND_LIBS})
 target_link_libraries(test_h3_client ${APP_DEPEND_LIBS})
+target_link_libraries(test_ping_ddos ${APP_DEPEND_LIBS})
 
 # build run_tests
 if(HAVE_CUNIT)

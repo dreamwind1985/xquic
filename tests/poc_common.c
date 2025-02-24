@@ -10,8 +10,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include "poc_common.h"
 
 xqc_int_t xqc_h3_request_copy_header(xqc_http_header_t *dst, xqc_http_header_t *src, xqc_var_buf_t *buf);
+int xqc_crypto_stream_send(xqc_stream_t *stream, 
+    xqc_list_head_t *crypto_data_list, xqc_pkt_type_t pkt_type);
 
 /* 用于16进制输出数据 */
 void
@@ -622,5 +625,139 @@ end:
 }
 
 
+xqc_packet_out_t *
+poc_raw_create_packet_out(enum xqc_pkt_type pkt_type)
+{
+    xqc_int_t pkt_out_size = XQC_PACKET_OUT_SIZE;
+    xqc_packet_out_t *packet_out;
+    packet_out = xqc_packet_out_create(pkt_out_size);
+    if (packet_out == NULL) {
+        return NULL;
+    }
+    packet_out->po_reserved_size = 0;
+
+    packet_out->po_pkt.pkt_type = pkt_type;
+    packet_out->po_pkt.pkt_pns = xqc_packet_type_to_pns(pkt_type);
+    packet_out->po_pkt.pkt_num = 0;
+
+    packet_out->po_path_id = XQC_INITIAL_PATH_ID;
+
+    return packet_out;
+}
+
+xqc_int_t
+poc_raw_gen_long_packet_header(xqc_packet_out_t *packet_out,
+    const unsigned char *dcid, unsigned char dcid_len,
+    const unsigned char *scid, unsigned char scid_len,
+    const unsigned char *token, uint32_t token_len)
+{
+    xqc_int_t ret = xqc_gen_long_packet_header(packet_out, dcid, dcid_len, scid, scid_len, token,
+                                               token_len, XQC_VERSION_V1, XQC_PKTNO_BITS);
+    if (ret < 0) {
+        return ret;
+    }
+    packet_out->po_used_size += ret;
+    return XQC_OK;
+}
 
 
+xqc_int_t
+poc_raw_client_derive_initial_keys(xqc_crypto_t *init_crypto, const xqc_cid_t *dcid)
+{
+    /* initial secret for packet protection client/server */
+    uint8_t cli_initial_secret[INITIAL_SECRET_MAX_LEN] = {0};
+    uint8_t svr_initial_secret[INITIAL_SECRET_MAX_LEN] = {0};
+    const uint8_t *salt = xqc_crypto_initial_salt[XQC_VERSION_V1]; 
+
+     /* derive initial key */
+    xqc_int_t ret = xqc_crypto_derive_initial_secret(cli_initial_secret, INITIAL_SECRET_MAX_LEN,
+                                           svr_initial_secret, INITIAL_SECRET_MAX_LEN,
+                                           dcid, salt,
+                                           strlen(salt));
+    if (XQC_OK != ret) {
+        printf("|derive initial secret error|ret:%d", ret);
+        return ret;
+    }
+    
+    /* client use client initial secret to derive tx key */
+    ret = xqc_crypto_derive_keys(init_crypto, cli_initial_secret, INITIAL_SECRET_MAX_LEN,
+                                 XQC_KEY_TYPE_TX_WRITE);
+    if (ret != XQC_OK) {
+        printf("|client install initial write key error");
+        return ret;
+    }
+
+    /* client use server initial secret to derive rx key */
+    ret = xqc_crypto_derive_keys(init_crypto, svr_initial_secret, INITIAL_SECRET_MAX_LEN,
+                                 XQC_KEY_TYPE_RX_READ);
+    if (ret != XQC_OK) {
+        printf("|client install initial read key error");
+        return ret;
+    }
+  
+    return XQC_OK;
+}
+
+
+void
+poc_gen_padding_frame(xqc_packet_out_t *packet_out)
+{
+    size_t total_len = XQC_PACKET_INITIAL_MIN_LENGTH;
+    if (packet_out->po_used_size < total_len) {
+        packet_out->po_padding = packet_out->po_buf + packet_out->po_used_size;
+        memset(packet_out->po_padding, 0, total_len - packet_out->po_used_size);
+        packet_out->po_used_size = total_len;
+        packet_out->po_frame_types |= XQC_FRAME_BIT_PADDING;        
+    }
+}
+
+
+xqc_int_t
+poc_initial_packet_encrypt(xqc_crypto_t *crypto, xqc_packet_out_t *packet_out, 
+    unsigned char *enc_buf, size_t buf_size, size_t *enc_data_len)
+{
+    xqc_int_t ret;
+    size_t enc_payload_len = 0;
+
+    /* source buffer */
+    uint8_t *header = (uint8_t *)packet_out->po_buf;
+    size_t   header_len = packet_out->po_payload - packet_out->po_buf;
+    uint8_t *payload = (uint8_t *)packet_out->po_payload;
+    size_t   payload_len = packet_out->po_used_size - header_len;
+    uint8_t *pktno = (uint8_t *)packet_out->po_ppktno;
+
+    /* destination buffer */
+    uint8_t *dst_header = enc_buf;
+    uint8_t *dst_pktno = dst_header + (pktno - header);
+    uint8_t *dst_payload = dst_header + header_len;
+    uint8_t *dst_end = dst_payload;
+
+    xqc_memcpy(dst_header, header, header_len);
+
+    /* refresh header length */
+    unsigned char *plength = dst_pktno - XQC_LONG_HEADER_LENGTH_BYTE;
+    uint32_t length = header + packet_out->po_used_size - pktno;
+    length += xqc_crypto_aead_tag_len(crypto);
+    xqc_vint_write(plength, length, 0x01, 2);
+
+    uint32_t nonce_path_id = 0;
+    uint32_t key_phase = 0;
+
+    ret = xqc_crypto_encrypt_payload(crypto, packet_out->po_pkt.pkt_num, key_phase, nonce_path_id,
+                                     dst_header, header_len, payload, payload_len,
+                                     dst_payload, buf_size - header_len,  &enc_payload_len);
+    if (ret != XQC_OK) {
+        printf("initial packet encrypt payload failed\n");
+        return ret;
+    }
+    *enc_data_len = header_len + enc_payload_len;
+
+    ret = xqc_crypto_encrypt_header(crypto, packet_out->po_pkt.pkt_type, dst_header, dst_pktno, dst_end);
+    if (ret != XQC_OK) {
+        printf("initial packet encrypt header failed\n");
+        return ret;
+    }
+    packet_out->po_enc_size = *enc_data_len;
+    
+    return XQC_OK;
+}
