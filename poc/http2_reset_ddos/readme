@@ -1,0 +1,12 @@
+refer: 
+https://github.com/bcdannyboy/CVE-2023-44487/blob/main/cve202344487.py 
+
+
+dependence:
+sudo yum install python3
+sudo pip3 install httpx h2 requests
+
+attack example:
+url: https://127.0.0.1:2443/h5/mtop.taobao.wireless.yitian.test.get/1.0
+
+command: python3 rapid_reset.py -i input_urls.txt -o output_results.csv
