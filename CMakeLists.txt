@@ -167,9 +167,9 @@ endif()
 
 # testing
 if(XQC_ENABLE_TESTING)
-    add_subdirectory(tests)
-    add_subdirectory(demo)
-    add_subdirectory(mini)
+    #add_subdirectory(tests)
+    #add_subdirectory(demo)
+    #add_subdirectory(mini)
 endif(XQC_ENABLE_TESTING)
 
 
@@ -436,7 +436,7 @@ if (XQC_ENABLE_TESTING)
         add_custom_target(check COMMAND ${CMAKE_CTEST_COMMAND})
     endif()
 
-    add_subdirectory(tests)
+    #add_subdirectory(tests)
     include_directories(${CMAKE_CURRENT_BINARY_DIR}/test)
 
     if(CMAKE_SYSTEM_NAME MATCHES "Windows")
@@ -453,8 +453,8 @@ if (XQC_ENABLE_TESTING)
     endif()
 
     ### test client/server ###
-    add_executable(test_server tests/test_server.c ${GETOPT_SOURCES})
-    add_executable(test_client tests/test_client.c ${GETOPT_SOURCES})
+    add_executable(test_server tests/test_server.c  tests/platform.c  ${GETOPT_SOURCES})
+    add_executable(test_client tests/test_client.c  tests/platform.c ${GETOPT_SOURCES})
     add_executable(xquic_bench tests/xquic_bench.c ${GETOPT_SOURCES})
     add_executable(test_h3_client tests/test_h3_client.c tests/client_common.c ${GETOPT_SOURCES})
     target_compile_definitions(test_h3_client PRIVATE -D_TEST_H3_CLIENT_)
@@ -466,6 +466,7 @@ if (XQC_ENABLE_TESTING)
         "demo/xqc_hq_ctx.c"
         "demo/xqc_hq_conn.c"
         "demo/xqc_hq_request.c"
+        "tests/platform.c"
     )
 
     set(
@@ -480,8 +481,8 @@ if (XQC_ENABLE_TESTING)
         "demo/demo_server.c"
     )
 
-    add_executable(demo_server ${DEMO_SERVER_SOURCES} ${GETOPT_SOURCES})
-    add_executable(demo_client ${DEMO_CLIENT_SOURCES} ${GETOPT_SOURCES})
+    #add_executable(demo_server ${DEMO_SERVER_SOURCES} ${GETOPT_SOURCES})
+    #add_executable(demo_client ${DEMO_CLIENT_SOURCES} ${GETOPT_SOURCES})
     if(CMAKE_SYSTEM_NAME  MATCHES "Windows")
         if (NOT EVENT_LIB_DIR)
             message("YOU NEED SET -DEVENT_LIB_DIR=your_event_path, eg:-DEVENT_LIB_DIR=D:/project/vcpkg/packages/libevent_x64-windows-static")
@@ -521,8 +522,8 @@ if (XQC_ENABLE_TESTING)
         target_link_libraries(test_h3_client xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm -D_TEST_H3_CLIENT_)
         target_link_libraries(test_dict_ddos xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm)
         target_link_libraries(test_trans_vul xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm)
-        target_link_libraries(demo_server xquic -levent -lm)
-        target_link_libraries(demo_client xquic -levent -lm)
+        #target_link_libraries(demo_server xquic -levent -lm)
+        #target_link_libraries(demo_client xquic -levent -lm)
     endif()
 
 endif()

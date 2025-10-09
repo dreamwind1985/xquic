@@ -853,12 +853,12 @@ create_user_stream(xqc_engine_t * engine, user_conn_t *user_conn, xqc_cid_t * ci
         return NULL;
     }
     if (user_conn->h3) {
-        user_stream->h3_request = xqc_h3_request_create(engine, cid, user_stream);
+        user_stream->h3_request = xqc_h3_request_create(engine, cid, NULL, user_stream);
         if (user_stream->h3_request == NULL) {
             return NULL;
         }
     } else {
-        user_stream->stream = xqc_stream_create(engine, cid, user_stream);
+        user_stream->stream = xqc_stream_create(engine, cid, NULL, user_stream);
         if (user_stream->stream == NULL) {
             return NULL;
         }

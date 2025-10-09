@@ -4453,7 +4453,7 @@ int main(int argc, char *argv[]) {
                 break;
 
             case 8:
-                strncpy(conn_options, optarg, XQC_CO_STR_MAX_LEN);
+                memcpy(conn_options, optarg, (strlen(optarg) < XQC_CO_STR_MAX_LEN)? (strlen(optarg) + 1): XQC_CO_STR_MAX_LEN);
                 printf("option conn_options: %s\n", conn_options);
                 break;
 

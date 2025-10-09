@@ -11,6 +11,10 @@
 #include <stdlib.h>
 #include <ctype.h>
 
+extern int 
+xqc_crypto_stream_send(xqc_stream_t *stream, 
+    xqc_list_head_t *crypto_data_list, xqc_pkt_type_t pkt_type);
+
 xqc_int_t xqc_h3_request_copy_header(xqc_http_header_t *dst, xqc_http_header_t *src, xqc_var_buf_t *buf);
 
 /* 用于16进制输出数据 */

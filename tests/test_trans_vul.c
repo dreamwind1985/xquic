@@ -99,7 +99,7 @@ test_trans_create_stream_callback(int fd, short what, void *arg)
             if(user_stream == NULL){
                 return;
             }
-            user_stream->stream = xqc_stream_create(engine, cid, user_stream);
+            user_stream->stream = xqc_stream_create(engine, cid, NULL, user_stream);
             if (user_stream->stream == NULL) {
                 return;
             }
@@ -161,7 +161,7 @@ test_trans_create_conn_callback(int fd, short what, void *arg)
         }
     };
 
-    xqc_engine_register_alpn(ctx->engine, XQC_ALPN_TRANSPORT, 9, &ap_cbs);
+    xqc_engine_register_alpn(ctx->engine, XQC_ALPN_TRANSPORT, 9, &ap_cbs, NULL);
 
     xqc_conn_ssl_config_t conn_ssl_config;
     memset(&conn_ssl_config, 0, sizeof(conn_ssl_config));

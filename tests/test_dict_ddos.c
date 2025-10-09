@@ -376,7 +376,7 @@ client_ddos_create_conn_callback(int fd, short what, void *arg)
         }
     };
 
-    xqc_engine_register_alpn(ctx->engine, XQC_ALPN_TRANSPORT, 9, &ap_cbs);
+    xqc_engine_register_alpn(ctx->engine, XQC_ALPN_TRANSPORT, 9, &ap_cbs, NULL);
 
 
     xqc_conn_ssl_config_t conn_ssl_config;
