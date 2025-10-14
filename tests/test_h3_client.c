@@ -338,6 +338,7 @@ client_test_request_closing_notify(xqc_h3_request_t *h3_request,
     printf("***** request closing notify triggered\n");
 }
 
+extern int     g_test_mode;
 void
 client_test_create_req_callback(int fd, short what, void *arg)
 {
@@ -350,7 +351,9 @@ client_test_create_req_callback(int fd, short what, void *arg)
                 printf("error create user_stream\n");
                 return;
             }
-            client_test_request_send(user_stream->h3_request, user_stream);
+            if (g_test_mode != 1) {
+                client_test_request_send(user_stream->h3_request, user_stream);
+            }
             user_conn->cur_stream_num++;
             user_conn->total_stream_num++;
             if (user_conn->total_stream_num >= g_stream_num_per_conn) {
