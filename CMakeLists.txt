@@ -460,6 +460,8 @@ if (XQC_ENABLE_TESTING)
     target_compile_definitions(test_h3_client PRIVATE -D_TEST_H3_CLIENT_)
     add_executable(test_dict_ddos tests/test_h3_client.c tests/client_common.c tests/poc_common.c tests/test_dict_ddos.c ${GETOPT_SOURCES})
     add_executable(test_trans_vul tests/client_common.c tests/poc_common.c tests/test_trans_vul.c ${GETOPT_SOURCES})
+    add_executable(test_initial_packet tests/client_common.c tests/poc_common.c tests/test_initial_packet.c ${GETOPT_SOURCES})
+    add_executable(test_h3_conn_perf tests/test_h3_conn_perf.c tests/client_common.c ${GETOPT_SOURCES})
     ### hq demo client/server ###
     set(
         HQ_SOURCES
@@ -522,6 +524,8 @@ if (XQC_ENABLE_TESTING)
         target_link_libraries(test_h3_client xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm -D_TEST_H3_CLIENT_)
         target_link_libraries(test_dict_ddos xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm)
         target_link_libraries(test_trans_vul xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm)
+        target_link_libraries(test_initial_packet xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm)
+        target_link_libraries(test_h3_conn_perf xquic-static ${SSL_LIB_PATH} -ldl -lpthread -levent -lm)
         #target_link_libraries(demo_server xquic -levent -lm)
         #target_link_libraries(demo_client xquic -levent -lm)
     endif()
