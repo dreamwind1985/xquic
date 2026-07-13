@@ -1375,7 +1375,8 @@ xqc_demo_svr_parse_args(int argc, char *argv[], xqc_demo_svr_args_t *args)
 
         case 's':
             printf("option scheduler: %s\n", optarg);
-            strncpy(args->quic_cfg.mp_sched, optarg, 32);
+            strncpy(args->quic_cfg.mp_sched, optarg, 31);
+            args->quic_cfg.mp_sched[31] = '\0';
             break;
 
         case 'R':
@@ -1411,6 +1412,16 @@ xqc_demo_svr_parse_args(int argc, char *argv[], xqc_demo_svr_args_t *args)
     }
 }
 
+int
+xqc_demo_svr_retry_packet_condition_check(xqc_engine_t *engine, xqc_connection_t *conn,
+    const xqc_cid_t *cid, void *user_data)
+{
+    if (svr_ctx.args && svr_ctx.args->quic_cfg.retry_on) {
+        return XQC_TRUE;
+    }
+    return XQC_FALSE;
+}
+
 void
 xqc_demo_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t *transport_cbs,
     xqc_demo_svr_args_t* args)
@@ -1431,6 +1442,8 @@ xqc_demo_svr_init_callback(xqc_engine_callback_t *cb, xqc_transport_callbacks_t 
         .write_socket = xqc_demo_svr_write_socket,
         .write_socket_ex = xqc_demo_svr_write_socket_ex,
         .conn_update_cid_notify = xqc_demo_svr_conn_update_cid_notify,
+        .conn_send_packet_before_accept = xqc_demo_svr_write_socket,
+        .conn_retry_packet_condition_check = xqc_demo_svr_retry_packet_condition_check,
     };
 
     *cb = callback;

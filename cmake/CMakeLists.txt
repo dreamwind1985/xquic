@@ -1,6 +1,6 @@
 # Copyright (c) 2022, Alibaba Group Holding Limited
 
-cmake_minimum_required (VERSION 2.6)
+cmake_minimum_required (VERSION 3.5)
 project (xquic)
 
 set (xquic_VERSION_MAJOR 0)
@@ -97,6 +97,10 @@ include(CMakeOptions.txt)
 
 if (XQC_BUILD_OPENSSL)
     if(${SSL_TYPE} MATCHES "boringssl")
+        if (XQC_OPENSSL_SMALL)
+            set(OPENSSL_SMALL "1")
+        endif()
+
         add_subdirectory(${SSL_PATH})
         include_directories(${SSL_PATH}/include)
 
@@ -142,7 +146,10 @@ include_directories(
     ${CMAKE_CURRENT_BINARY_DIR}/include
 )
 
-
+if(XQC_ENABLE_MOQ)
+    add_subdirectory(moq)
+endif()
+ 
 # http3/qpack source
 set(
     HTTP3_SOURCES
@@ -192,6 +199,7 @@ set(
     "src/transport/xqc_quic_lb.c"
     "src/transport/xqc_timer.c"
     "src/transport/xqc_reinjection.c"
+    "src/transport/xqc_recv_timestamps_info.c"
     "src/transport/reinjection_control/xqc_reinj_default.c"
     "src/transport/reinjection_control/xqc_reinj_deadline.c"
     "src/transport/reinjection_control/xqc_reinj_dgram.c"
@@ -339,16 +347,6 @@ if(XQC_ENABLE_UNLIMITED)
     )
 endif()
 
-# add tunnel
-if(XQC_ENABLE_TH3 OR XQC_ENABLE_TUNNEL)
-    set(
-        XQC_SOURCE
-    )
-    if(XQC_ENABLE_TNL_DG)
-        set(CMAKE_C_FLAGS   "${CMAKE_C_FLAGS} -DXQC_ENABLE_TNL_DG ")
-    endif()
-    add_subdirectory(tunnel)
-endif()
 
 if (XQC_NO_SHARED)
     set(XQC_BINARY_TYPE STATIC)

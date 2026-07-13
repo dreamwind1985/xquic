@@ -18,6 +18,8 @@
 #include <stdint.h>
 
 #include "platform.h"
+#include "src/transport/xqc_conn.h"
+#include "src/transport/xqc_packet_out.h"
 
 #ifndef XQC_SYS_WINDOWS
 #include <unistd.h>
@@ -144,8 +146,10 @@ int g_send_body_size_defined;
 int g_save_body;
 int g_read_body;
 int g_spec_url;
-//99 pure fin
+/* 99 pure fin, 7XX for 0-RTT transport param validation */
 int g_test_case;
+int g_server_conn_cnt;
+xqc_conn_settings_t g_conn_settings;
 int g_ipv6;
 int g_batch=0;
 int g_lb_cid_encryption_on = 0;
@@ -192,12 +196,18 @@ load_cdf(char *cdf_file)
         return -1;
     }
     int n;
-    fscanf(fp, "%d", &n);
+    if (fscanf(fp, "%d", &n) != 1) {
+        fclose(fp);
+        return -1;
+    }
     cdf_list_size = n;
     cdf_list = malloc(sizeof(cdf_entry_t) * cdf_list_size);
     while (n--) {
-        fscanf(fp, "%lf%d", &cdf_list[cdf_list_size - n - 1].p, &cdf_list[cdf_list_size - n - 1].val);
+        if (fscanf(fp, "%lf%d", &cdf_list[cdf_list_size - n - 1].p, &cdf_list[cdf_list_size - n - 1].val) != 2) {
+            break;
+        }
     }
+    fclose(fp);
     return 0;
 }
 
@@ -965,6 +975,19 @@ xqc_server_h3_conn_close_notify(xqc_h3_conn_t *h3_conn, const xqc_cid_t *cid, vo
 
     free(user_conn);
 
+    g_server_conn_cnt++;
+
+    /*
+     * test 701: after the first connection closes, reduce max_streams_bidi
+     * so the second connection (with 0-RTT) hits the RFC 9000 Section 7.4.1
+     * validation check on the client side.
+     */
+    if (g_test_case == 701 && g_server_conn_cnt == 1) {
+        g_conn_settings.max_streams_bidi = 1;
+        xqc_server_set_conn_settings(ctx.engine, &g_conn_settings);
+        printf("test_701: reduced max_streams_bidi to 1 for next conn\n");
+    }
+
     if (g_mpshell) {
         event_base_loopbreak(eb);
         printf("xqc_server_h3_conn_close_notify\n");
@@ -982,6 +1005,50 @@ xqc_server_h3_conn_handshake_finished(xqc_h3_conn_t *h3_conn, void *conn_user_da
     printf("0rtt_flag:%d\n", stats.early_data_flag);
     printf("h3_datagram_mss:%zd\n", xqc_h3_ext_datagram_get_mss(h3_conn));
 
+
+    if (g_test_case == 48) {
+        printf("[initial-salt-test] server handshake ok, conn_err:%d\n",
+               stats.conn_err);
+    }
+
+    if (g_test_case == 704) {
+        xqc_connection_t *conn = xqc_h3_conn_get_xqc_conn(h3_conn);
+        xqc_cid_set_inner_t *inner_set;
+        uint64_t peer_limit;
+        uint64_t target;
+        uint64_t countable;
+        xqc_int_t ret = XQC_OK;
+
+        if (conn == NULL) {
+            printf("[active-cid-limit-test] conn unavailable\n");
+            return;
+        }
+
+        inner_set = xqc_get_path_cid_set(&conn->scid_set, XQC_INITIAL_PATH_ID);
+        if (inner_set == NULL) {
+            printf("[active-cid-limit-test] cid set unavailable\n");
+            return;
+        }
+
+        peer_limit = conn->remote_settings.active_connection_id_limit;
+        target = peer_limit + 1;
+        countable = xqc_cid_set_countable_cnt(inner_set);
+
+        conn->remote_settings.active_connection_id_limit = target;
+        while (countable < target) {
+            ret = xqc_write_new_conn_id_frame_to_packet(conn, 0);
+            if (ret != XQC_OK) {
+                printf("[active-cid-limit-test] force NEW_CONNECTION_ID ret:%d\n",
+                       ret);
+                break;
+            }
+            countable = xqc_cid_set_countable_cnt(inner_set);
+        }
+        conn->remote_settings.active_connection_id_limit = peer_limit;
+
+        printf("[active-cid-limit-test] peer_limit:%"PRIu64
+               ", sent_countable:%"PRIu64"\n", peer_limit, countable);
+    }
 
     /* pretend to create a server-inited http3 stream */
     if (g_test_case == 17) {
@@ -1367,6 +1434,7 @@ xqc_server_request_read_notify(xqc_h3_request_t *h3_request, xqc_request_notify_
 
         for (int i = 0; i < headers->count; i++) {
             printf("%s = %s\n", (char *)headers->headers[i].name.iov_base, (char *)headers->headers[i].value.iov_base);
+
             if (headers->headers[i].name.iov_len == 8
                 && memcmp((char *)headers->headers[i].name.iov_base, "priority", 8) == 0) {
                 xqc_h3_priority_t h3_prio;
@@ -2008,6 +2076,13 @@ xqc_keylog_cb(const xqc_cid_t *scid, const char *line, void *user_data)
     }
 }
 
+void xqc_server_conn_ssl_msg_cb(int msg_type, 
+    const void *msg, size_t msg_len, void *user_data)
+{
+    user_conn_t *user_conn = (user_conn_t *)user_data;
+    printf("user_conn:%p , scid:%s, msg_type:%d, msg_len:%d\n", user_conn, xqc_scid_str(ctx.engine, &user_conn->cid), msg_type, (int)msg_len);
+}
+
 #if defined(XQC_SUPPORT_SENDMMSG) && !defined(XQC_SYS_WINDOWS)
 ssize_t xqc_server_write_mmsg(const struct iovec *msg_iov, unsigned int vlen,
                                 const struct sockaddr *peer_addr,
@@ -2020,6 +2095,8 @@ ssize_t xqc_server_write_mmsg(const struct iovec *msg_iov, unsigned int vlen,
     struct mmsghdr mmsg[MAX_SEG];
     memset(&mmsg, 0, sizeof(mmsg));
     for (int i = 0; i < vlen; i++) {
+        mmsg[i].msg_hdr.msg_name = (void *)peer_addr;
+        mmsg[i].msg_hdr.msg_namelen = peer_addrlen;
         mmsg[i].msg_hdr.msg_iov = (struct iovec *)&msg_iov[i];
         mmsg[i].msg_hdr.msg_iovlen = 1;
     }
@@ -2043,6 +2120,19 @@ ssize_t xqc_server_mp_write_mmsg(uint64_t path_id,
     return xqc_server_write_mmsg(msg_iov, vlen, peer_addr, peer_addrlen, user);
 }
 #endif
+
+int
+xqc_retry_packet_check(xqc_engine_t *engine, xqc_connection_t *conn, const xqc_cid_t *cid, void * user_data)
+{
+    (void *)engine;
+    (void *)conn;
+    (void *)cid;
+    (void *)user_data;
+    if (g_test_case == 601) { /* 601 for test retry packet */
+        return XQC_TRUE;
+    }
+    return XQC_FALSE; 
+}
 
 void
 stop(int signo)
@@ -2124,7 +2214,7 @@ int main(int argc, char *argv[]) {
     uint8_t c_qlog_disable = 0;
     char c_qlog_importance = 'r';
     int pacing_on = 0;
-    strncpy(g_log_path, "./slog", sizeof(g_log_path));
+    snprintf(g_log_path, sizeof(g_log_path), "%s", "./slog");
 
     //ensure the random sequence is the same for every test
     srand(0);
@@ -2393,6 +2483,9 @@ int main(int argc, char *argv[]) {
         .conn_peer_addr_changed_notify = xqc_server_conn_peer_addr_changed_notify,
         .path_peer_addr_changed_notify = xqc_server_path_peer_addr_changed_notify,
         .path_removed_notify = xqc_server_path_removed_notify,
+        .conn_ssl_msg_cb = xqc_server_conn_ssl_msg_cb,
+        .conn_retry_packet_condition_check = xqc_retry_packet_check,
+        .conn_send_packet_before_accept = xqc_server_write_socket, 
     };
 
     xqc_cong_ctrl_callback_t cong_ctrl;
@@ -2447,10 +2540,10 @@ int main(int argc, char *argv[]) {
         .pacing_on  =   pacing_on,
         .cong_ctrl_callback = cong_ctrl,
         .cc_params  =   {
-            .customize_on = 1, 
-            .init_cwnd = 32, 
+            .customize_on = 1,
+            .init_cwnd = 32,
             .cc_optimization_flags = cong_flags,
-            .copa_delta_ai_unit = g_copa_ai, 
+            .copa_delta_ai_unit = g_copa_ai,
             .copa_delta_base = g_copa_delta,
         },
         .enable_multipath = g_enable_multipath,
@@ -2465,7 +2558,7 @@ int main(int argc, char *argv[]) {
     };
 
     if (g_pmtud_on) {
-        conn_settings.enable_pmtud = 1;
+        conn_settings.enable_pmtud = 3;
     }
 
     if (g_test_case == 6) {
@@ -2511,9 +2604,16 @@ int main(int argc, char *argv[]) {
         fec_params.fec_encoder_schemes_num = 3;
         fec_params.fec_decoder_schemes_num = 3;
         fec_params.fec_max_window_size = 8;
-        fec_params.fec_code_rate = 0.1;
-        fec_params.fec_max_symbol_num_per_block = 39;
+        fec_params.fec_code_rate = 0.2;
+        fec_params.fec_max_symbol_num_per_block = 10;
         fec_params.fec_mp_mode = XQC_FEC_MP_USE_STB;
+
+        /* Case 700: see test_client.c for rationale (issue #534 bit 32 fix) */
+        if (g_test_case == 700) {
+            fec_params.fec_code_rate = 1.0;
+            fec_params.fec_max_symbol_num_per_block = 5;
+        }
+
         conn_settings.fec_params = fec_params;
     }
 
@@ -2545,6 +2645,44 @@ int main(int argc, char *argv[]) {
     if (g_test_case == 211) {
         conn_settings.datagram_redundancy = 2;
         conn_settings.datagram_redundant_probe = 30000;
+    }
+
+    if (g_test_case == 450) {
+        conn_settings.extended_ack_features = 2;
+        conn_settings.max_receive_timestamps_per_ack = 45;
+        conn_settings.receive_timestamps_exponent = 0;
+    }
+
+    /* Set larger blocked buffer limits for QPACK to avoid triggering limits in tests */
+    conn_settings.max_blocked_buf_per_stream = 10 * 1024 * 1024;  /* 10 MB per stream */
+    conn_settings.max_blocked_buf_per_conn = 50 * 1024 * 1024;    /* 50 MB per connection */
+
+    if (g_test_case == 451) {
+        conn_settings.extended_ack_features = 0;
+        conn_settings.max_receive_timestamps_per_ack = 40;
+        conn_settings.receive_timestamps_exponent = 0;
+    }
+
+    if (g_test_case == 452) {
+        conn_settings.extended_ack_features = 2;
+        /* negotiation fail test, because max_receive_timestamps_per_ack > 63 */
+        conn_settings.max_receive_timestamps_per_ack = 64;
+        conn_settings.receive_timestamps_exponent = 0;
+    }
+
+    if (g_test_case == 453) {
+        conn_settings.extended_ack_features = 2;
+        conn_settings.max_receive_timestamps_per_ack = 0;
+        conn_settings.receive_timestamps_exponent = 0;
+    }
+
+    if (g_test_case == 454 || g_test_case == 455) {
+        conn_settings.simulate_ecn = 1;
+    }
+
+    /* test 702: server starts with reduced max_streams_bidi from the beginning */
+    if (g_test_case == 702) {
+        conn_settings.max_streams_bidi = 1;
     }
 
     xqc_config_t config;
@@ -2586,8 +2724,22 @@ int main(int argc, char *argv[]) {
     }
 #endif
 
+    /*
+     * VN abort test (case 33): offer only draft-29 so that the V1
+     * client hits the abort path instead of the downgrade-protection
+     * discard.  Server's VN will list 0xFF00001D only; V1 is absent,
+     * so the client's current_wire_version check passes and the
+     * connection is correctly abandoned per RFC 9000 §6.2.
+     */
+    if (g_test_case == 33) {
+        config.support_version_count = 1;
+        config.support_version_list[0] = 0xFF00001D; /* draft-29 */
+    }
+
     /* test server cid negotiate */
-    if (g_test_case == 1 || g_test_case == 5 || g_test_case == 6 || g_sid_len != 0) {
+    if (g_test_case == 1 || g_test_case == 5 || g_test_case == 6
+        || g_test_case == 704 || g_sid_len != 0)
+    {
 
         if (g_lb_cid_enc_key_len == 0) {
             int i = 0;
@@ -2609,6 +2761,7 @@ int main(int argc, char *argv[]) {
         return -1;
     }
 
+    g_conn_settings = conn_settings;
     xqc_server_set_conn_settings(ctx.engine, &conn_settings);
 
     /* register http3 callbacks */

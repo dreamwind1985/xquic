@@ -19,6 +19,16 @@
 #include <arpa/inet.h>
 #endif
 
+#if defined(__SSE2__)
+// SSE2
+#include <emmintrin.h>
+#define XQC_ON_x86
+#elif defined(__ARM_NEON__) || defined(__ARM_NEON)
+// NEON
+#include <arm_neon.h>
+#define XQC_ON_ARM
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -62,7 +72,9 @@ typedef enum xqc_proto_version_s {
 
 #define XQC_RESET_TOKEN_MAX_KEY_LEN     256
 
-
+#define XQC_TOKEN_MAX_KEY_VERSION       4
+#define XQC_TOKEN_VERSION_MASK          3
+#define XQC_TOKEN_MAX_KEY_LEN           256
 /**
  * the max message count of iovec in sendmmsg
  */
@@ -407,6 +419,17 @@ typedef void (*xqc_conn_ready_to_create_path_notify_pt)(const xqc_cid_t *scid,
 typedef xqc_int_t (*xqc_conn_cert_cb_pt)(const char *sni,
     void **chain, void **crt, void **key, void *user_data);
 
+typedef void (*xqc_conn_ssl_msg_cb_pt)(int msg_type, 
+    const void *msg, size_t msg_len, void *user_data);
+
+/**
+ * @brief to determine whether to send a retry packet
+ * @return XQC_TRUE(1): meet condition to send a retry packet
+ *         XQC_FALSE(0): don't meet condition to send a retry packet or  an error occurred while judging the condition
+ */
+typedef int (*xqc_conn_retry_packet_pt)(xqc_engine_t *engine, xqc_connection_t *conn,
+    const xqc_cid_t *cid, void *user_data);
+
 /**
  * @brief multi-path create callback function
  *
@@ -589,14 +612,14 @@ typedef void (*xqc_datagram_mss_updated_notify_pt)(xqc_connection_t *conn,
  * 3. Callbacks between Transport and Application Protocol:
  * QUIC events that might be more essential to Application-Layer-Protocols, especially stream data
  *
+ * +------------------------------------------------------------------------------+
+ * |                             Application                                      |
+ * |                                 +-- Application Protocol defined callbacks --+
+ * |                                 |             Application Protocol           |
+ * +-------- transport callbacks ----+--------- app protocol callbacks -----------+
+ * |                              Transport                                       |
+ * +------------------------------------------------------------------------------+
  */
-//  * +------------------------------------------------------------------------------+
-//  * |                             Application                                      |
-//  * |                                 +-- Application Protocol defined callbacks --+
-//  * |                                 |             Application Protocol           |
-//  * +-------- transport callbacks ----+--------- app protocol callbacks -----------+
-//  * |                              Transport                                       |
-//  * +------------------------------------------------------------------------------+
 typedef struct xqc_transport_callbacks_s {
     /**
      * accept new connection callback. REQUIRED only for server \n
@@ -692,6 +715,17 @@ typedef struct xqc_transport_callbacks_s {
      * @brief cert callback
      */
     xqc_conn_cert_cb_pt                     conn_cert_cb;
+
+    xqc_conn_ssl_msg_cb_pt                  conn_ssl_msg_cb;
+    /**
+     * @brief check the conditions to send retry packet
+     */
+    xqc_conn_retry_packet_pt                conn_retry_packet_condition_check;
+    /**
+     * @brief server send packet before server accept the connection.
+     * for example, retry packet is sent when the application layer connection has not been established, 
+     */
+    xqc_socket_write_pt                     conn_send_packet_before_accept;
 
 } xqc_transport_callbacks_t;
 
@@ -899,6 +933,11 @@ typedef enum {
     XQC_FEC_MP_USE_STB = 1,
 } xqc_fec_mp_mode_e;
 
+typedef enum {
+    XQC_FEC_RANDOM_TBL  = 0,
+    XQC_FEC_BURST_TBL   = 1    
+} xqc_fec_tbl_mode_e;
+
 /**
  * @brief FEC parameters on connection settings
  */
@@ -911,11 +950,13 @@ typedef struct xqc_fec_params_s {
     uint64_t                fec_protected_frames;
     /** maximum number of block that current host can store */
     uint64_t                fec_max_window_size;
-    /** fec specific mp mode */
-    xqc_fec_mp_mode_e       fec_mp_mode;
     /** (B) maximum symbol number of each block */
     uint64_t                fec_max_symbol_num_per_block;
-    
+    /** fec specific mp mode */
+    xqc_fec_mp_mode_e       fec_mp_mode;
+
+    xqc_bool_t              fec_log_on;
+
     xqc_int_t               fec_encoder_schemes_num;
     xqc_int_t               fec_decoder_schemes_num;
     /** fec schemes supported by current host as encoder */
@@ -927,6 +968,8 @@ typedef struct xqc_fec_params_s {
     xqc_fec_schemes_e       fec_encoder_scheme;
     /** final fec scheme as decoder after negotiation */
     xqc_fec_schemes_e       fec_decoder_scheme;
+    xqc_flag_t              fec_blk_log_mod;
+    xqc_fec_tbl_mode_e      fec_packet_mask_mode;
 } xqc_fec_params_t;
 
 /**
@@ -1077,7 +1120,7 @@ typedef struct xqc_config_s {
     /** enable log based on event or not, non-zero for enable, 0 for not */
     xqc_flag_t      cfg_log_event;
 
-    /** qlog evnet importance */
+    /** qlog event importance */
     qlog_event_importance_t cfg_qlog_importance;
 
     /** print timestamp in log or not, non-zero for print, 0 for not */
@@ -1094,8 +1137,6 @@ typedef struct xqc_config_s {
 
     /** bucket size of connection hash table in engine */
     size_t          conns_hash_bucket_size;
-    /* for warning when the number of elements in one bucket exceeds the value of hash_conflict_threshold*/
-    uint32_t        hash_conflict_threshold;
 
     /** capacity of connection priority queue in engine */
     size_t          conns_active_pq_capacity;
@@ -1146,6 +1187,13 @@ typedef struct xqc_config_s {
      */
     uint8_t         manually_triggered_send;
 
+    /** for warning when the number of elements in one bucket exceeds the value of hash_conflict_threshold*/
+    uint32_t        hash_conflict_threshold;
+
+    /* used to encrypt token */
+    unsigned char   token_key_list[XQC_TOKEN_MAX_KEY_VERSION][XQC_TOKEN_MAX_KEY_LEN];
+    uint16_t        tk_len_list[XQC_TOKEN_MAX_KEY_VERSION];
+    uint8_t         cur_tk_index; /* current used token key version */
 } xqc_config_t;
 
 
@@ -1179,7 +1227,7 @@ typedef struct xqc_engine_callback_s {
  * @brief engine's ssl config
  */
 typedef struct xqc_engine_ssl_config_s {
-    /** private key filefor server */
+    /** private key file for server */
     char       *private_key_file;
     /** certificate file for server */
     char       *cert_file;
@@ -1205,6 +1253,11 @@ typedef enum {
     XQC_RED_NOT_USE             = 0,
     XQC_RED_SET_CLOSE           = 1,
 } xqc_dgram_red_setting_e;
+
+typedef enum {
+    XQC_FEC_CONN_LEVEL      = 0,
+    XQC_FEC_STREAM_LEVEL    = 1
+} xqc_fec_level_e;
 
 /**
  * @brief connection tls config for client
@@ -1237,6 +1290,11 @@ typedef struct xqc_conn_ssl_config_s {
      * certificate verify flag. which is a bit-map flag defined in xqc_cert_verify_flag_e
      */
     uint8_t     cert_verify_flag;
+
+    /**
+     * ssl curve list (groups). If not set, xquic will use the default engine-level value.
+     */
+    xqc_tls_group_type_t   tls_groups;
 } xqc_conn_ssl_config_t;
 
 typedef struct xqc_linger_s {
@@ -1283,6 +1341,7 @@ typedef struct xqc_conn_settings_s {
     xqc_msec_t                  init_idle_time_out; 
     /** idle timeout interval, effective after handshake completion */
     xqc_msec_t                  idle_time_out;
+    xqc_usec_t                  fec_conn_queue_rpr_timeout;
     int32_t                     spurious_loss_detect_on;
     /** limit of anti-amplification, default 5 */
     uint32_t                    anti_amplification_limit;
@@ -1372,7 +1431,16 @@ typedef struct xqc_conn_settings_s {
     uint8_t                     datagram_force_retrans_on;
     uint64_t                    datagram_redundant_probe;
 
-    /** enable PMTUD */
+     /**
+     * enable PMTUD: 
+     * 0x0 disbale, 
+     * 0x1 enable client probing, 
+     * 0x2 enable server probing, 
+     * 0x3 enable both ends probing
+     * NOTE: This option needs to be negotiated by both ends. The final decision
+     * is made by the logic AND operation of both ends' options, e.g. client:
+     * 0x3, server: 0x1 --> 0x1 (only enable client probing).
+     **/
     uint8_t                     enable_pmtud;
     /** probing interval (us), default: 500000 */
     uint64_t                    pmtud_probing_interval; 
@@ -1430,8 +1498,6 @@ typedef struct xqc_conn_settings_s {
     uint64_t                    enable_decode_fec;
     xqc_fec_params_t            fec_params;
     xqc_fec_code_callback_t     fec_callback;
-    xqc_fec_code_callback_t     fec_encode_callback;
-    xqc_fec_code_callback_t     fec_decode_callback;
 
     xqc_dgram_red_setting_e     close_dgram_redundancy;
 
@@ -1445,6 +1511,48 @@ typedef struct xqc_conn_settings_s {
      */
     uint8_t                     control_pto_value;
 
+    uint64_t                    max_udp_payload_size;
+
+    /** 
+     * encode fec on connection level or stream level ?
+     * 0: (default) connection level
+     * 1: stream level, only be applied to MOQ
+     */
+    xqc_fec_level_e             fec_level;
+    uint64_t                    extended_ack_features;
+    uint64_t                    max_receive_timestamps_per_ack;
+    uint64_t                    receive_timestamps_exponent;
+
+    uint8_t                     disable_pn_skipping;
+    
+    /* The client can specify its own scid or dcid. Default: 0 */
+    uint8_t                     specify_client_scid;
+    uint8_t                     client_scid[XQC_MAX_CID_LEN];
+    uint8_t                     specify_client_dcid;
+    uint8_t                     client_dcid[XQC_MAX_CID_LEN];
+    
+    uint64_t                    max_streams_bidi;
+    uint64_t                    max_streams_uni;
+
+    /*
+     * testing only: when non-zero, xqc_gen_ack_frame writes ACK_ECN
+     * (type 0x03) with dummy ECN counts instead of plain ACK (0x02).
+     */
+    uint8_t                     simulate_ecn;
+
+    /**
+     * Maximum blocked buffer size per stream (bytes) for QPACK decode blocking.
+     * This limits memory usage when QPACK decoding is blocked waiting for
+     * dynamic table updates. Default: 0 (use internal default: 1MB)
+     */
+    size_t                      max_blocked_buf_per_stream;
+
+    /**
+     * Maximum total blocked buffer size per connection (bytes) for QPACK decode blocking.
+     * This limits total memory usage across all blocked streams on a connection.
+     * Default: 0 (use internal default: 8MB)
+     */
+    size_t                      max_blocked_buf_per_conn;
 } xqc_conn_settings_t;
 
 
@@ -1460,6 +1568,7 @@ typedef enum {
 
 #define XQC_MAX_PATHS_COUNT 8
 #define XQC_CONN_INFO_LEN 400
+#define XQC_EXTERN_CONN_INFO_LEN 128
 
 typedef struct xqc_path_metrics_s {
     uint64_t            path_id;
@@ -1525,12 +1634,19 @@ typedef struct xqc_conn_stats_s {
 
     char                alpn[XQC_MAX_ALPN_BUF_LEN];
 
+    char                extern_conn_info[XQC_EXTERN_CONN_INFO_LEN];
+
     uint32_t            send_fec_cnt;
 
     uint8_t             enable_fec;
     /** only accounts for stream and datagram packets */
     uint64_t            total_app_bytes;
     uint64_t            standby_path_app_bytes;
+
+    uint32_t            max_acked_mtu;
+
+    uint32_t            fec_recover_pkt_cnt;
+    xqc_usec_t          avg_close_time;
 } xqc_conn_stats_t;
 
 typedef struct xqc_conn_qos_stats_s {

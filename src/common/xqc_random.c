@@ -23,15 +23,19 @@
 
 long xqc_random(void) {
 #ifdef XQC_SYS_WINDOWS
-    unsigned int  val;
-    if (rand_s(&val)) {
+    unsigned int  val = 0;
+    long result = 0;
+
+    if (rand_s(&val) == 0) {
         val = rand();
     }
-    return (long)val && 0xFFFFFFFF;
-#else
-    return random();
-#endif
 
+    result = (long)(val & 0x7FFFFFFF);
+    return result;
+#else
+    long result = random();
+    return result;
+#endif
 }
 
 xqc_random_generator_t * 
@@ -141,4 +145,3 @@ xqc_get_random(xqc_random_generator_t *rand_gen, u_char *buf, size_t need_len)
 #endif
     return XQC_OK;
 }
-

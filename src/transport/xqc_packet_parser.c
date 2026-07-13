@@ -138,11 +138,14 @@ xqc_packet_decode_packet_number(xqc_packet_number_t largest_pn, xqc_packet_numbe
 
     candidate_pn = (expected_pn & ~pn_mask) | truncated_pn;
 
-    if (candidate_pn + pn_hwin <= expected_pn) {
+    // To fully align with RFC9000
+    if ((candidate_pn + pn_hwin <= expected_pn)
+        && (candidate_pn < ((1ULL << 62) - pn_win))) 
+    {
         return candidate_pn + pn_win;
     }
 
-    if (candidate_pn > expected_pn + pn_hwin && candidate_pn > pn_win) {
+    if (candidate_pn > expected_pn + pn_hwin && candidate_pn >= pn_win) {
         return candidate_pn - pn_win;
     }
 
@@ -286,10 +289,6 @@ xqc_packet_parse_short_header(xqc_connection_t *c, xqc_packet_in_t *packet_in)
     if (packet_in->last > end) {
         xqc_log(c->log, XQC_LOG_ERROR, "|illegal pkt with wrong length");
         return -XQC_EILLPKT;
-    }
-
-    if (c->conn_type == XQC_CONN_TYPE_CLIENT) {
-        c->discard_vn_flag = 1;
     }
 
     return XQC_OK;
@@ -461,21 +460,14 @@ xqc_packet_parse_initial(xqc_connection_t *c, xqc_packet_in_t *packet_in)
     packet_in->pi_pkt.pkt_type = XQC_PTYPE_INIT;
     packet_in->pi_pkt.pkt_pns = XQC_PNS_INIT;
 
-    if (c->conn_state == XQC_CONN_STATE_SERVER_INIT 
-        && !(c->conn_flag & XQC_CONN_FLAG_INIT_RECVD))
-    {
+    /* The smallest length of udp datagrams carrying initial packet frome client is 1200  */
+    if (c->conn_type == XQC_CONN_TYPE_SERVER) {
         if (XQC_BUFF_LEFT_SIZE(packet_in->buf, end) < XQC_PACKET_INITIAL_MIN_LENGTH) {
             xqc_log(c->log, XQC_LOG_ERROR, "|initial size too small|%z|",
                     (size_t)XQC_BUFF_LEFT_SIZE(packet_in->buf, end));
             XQC_CONN_ERR(c, TRA_PROTOCOL_VIOLATION);
             return -XQC_EILLPKT;
         }
-        c->conn_flag |= XQC_CONN_FLAG_INIT_RECVD;
-
-    } else if (c->conn_state == XQC_CONN_STATE_CLIENT_INITIAL_SENT
-               && !(c->conn_flag & XQC_CONN_FLAG_INIT_RECVD))
-    {
-        c->conn_flag |= XQC_CONN_FLAG_INIT_RECVD;
     }
 
     /* Token Length(i) & Token */
@@ -590,6 +582,12 @@ xqc_packet_encrypt_buf(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
     size_t enc_payload_len = 0;
 
     xqc_encrypt_level_t level = xqc_packet_type_to_enc_level(packet_out->po_pkt.pkt_type);
+   
+    /* check encrypt key ready */
+    if (xqc_tls_is_key_ready(conn->tls, level, XQC_KEY_TYPE_TX_WRITE) == XQC_FALSE) {
+        xqc_log(conn->log, XQC_LOG_ERROR, "|crypto not initialized|level:%d|", level);
+        return -XQC_TLS_INVALID_STATE;
+    }
 
     /* source buffer */
     uint8_t *header = (uint8_t *)packet_out->po_buf;
@@ -602,7 +600,6 @@ xqc_packet_encrypt_buf(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
     uint8_t *dst_header = enc_pkt;
     uint8_t *dst_pktno = dst_header + (pktno - header);
     uint8_t *dst_payload = dst_header + header_len;
-    uint8_t *dst_end = dst_payload;
     xqc_path_ctx_t *path = xqc_conn_find_path_by_path_id(conn, packet_out->po_path_id);
 
     if (path == NULL) {
@@ -626,7 +623,6 @@ xqc_packet_encrypt_buf(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
     }
 
     /* do packet protection */
-    //TODO: MPQUIC fix migration
     uint32_t nonce_path_id = (conn->enable_multipath) ? 
                              (uint32_t)path->path_id : 0;
 
@@ -636,7 +632,7 @@ xqc_packet_encrypt_buf(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
                                   dst_header, header_len, payload, payload_len,
                                   dst_payload, enc_pkt_cap - header_len, &enc_payload_len);
     if (ret != XQC_OK) {
-        XQC_CONN_ERR(conn, TRA_CRYPTO_ERROR);
+        XQC_CONN_ERR(conn, TRA_INTERNAL_ERROR);
         xqc_log(conn->log, XQC_LOG_ERROR, "|packet protection error|pkt_type:%d|pkt_num:%ui",
                 packet_out->po_pkt.pkt_type, packet_out->po_pkt.pkt_num);
         return ret;
@@ -646,7 +642,7 @@ xqc_packet_encrypt_buf(xqc_connection_t *conn, xqc_packet_out_t *packet_out,
 
     /* do header protection */
     ret = xqc_tls_encrypt_header(conn->tls, level, packet_out->po_pkt.pkt_type,
-                                 dst_header, dst_pktno, dst_end);
+                                 dst_header, dst_pktno, dst_header + *enc_pkt_len);
     if (ret != XQC_OK) {
         xqc_log(conn->log, XQC_LOG_ERROR, "|header protection error|pkt_type:%d|pkt_num:%ui",
                 packet_out->po_pkt.pkt_type, packet_out->po_pkt.pkt_num);
@@ -888,6 +884,43 @@ xqc_packet_parse_handshake(xqc_connection_t *c, xqc_packet_in_t *packet_in)
     return XQC_OK;
 }
 
+#define RETRY_PSEUDO_PACKET_SIZE (3 * (1 + XQC_MAX_CID_LEN) + 1 + 4 + XQC_MAX_TOKEN_LEN)
+
+xqc_int_t
+xqc_conn_gen_retry_integrity_tag(xqc_connection_t *conn, const uint8_t *odcid_buf, unsigned odcid_len,
+    uint8_t *retry_buf, unsigned retry_len, uint8_t *tag_buf, size_t *tag_len)
+{
+    uint8_t pseudo_buf[RETRY_PSEUDO_PACKET_SIZE] = {0};
+    size_t pseudo_len = sizeof(uint8_t) + odcid_len + retry_len;
+    uint8_t *dst_buf = pseudo_buf;
+    if (retry_len + odcid_len > RETRY_PSEUDO_PACKET_SIZE) {
+        xqc_log(conn->log, XQC_LOG_ERROR,
+                "|xqc_tls_gen_retry_integrity_tag length invalid|retry_len:%d|odcid_len:%d|",
+                retry_len, odcid_len);
+ 
+        return XQC_ERROR;
+    } 
+    
+    *dst_buf++ = odcid_len;
+    memcpy(dst_buf, odcid_buf, odcid_len);
+    dst_buf += odcid_len;
+    xqc_memcpy(dst_buf, retry_buf, retry_len);
+    dst_buf += retry_len;
+    xqc_int_t ret = xqc_tls_cal_retry_integrity_tag(conn->log,
+                                                    pseudo_buf, pseudo_len,
+                                                    tag_buf, XQC_RETRY_INTEGRITY_TAG_LEN,
+                                                    tag_len, conn->version);
+   
+    if (ret != XQC_OK || *tag_len != XQC_RETRY_INTEGRITY_TAG_LEN) {
+        xqc_log(conn->log, XQC_LOG_ERROR,
+                "|xqc_tls_cal_retry_integrity_tag error|ret:%d|tag_len:%d|", ret, *tag_len);
+        return XQC_ERROR;
+    }
+
+    return XQC_OK;
+}
+
+
 /*
  *
  0                   1                   2                   3
@@ -918,9 +951,9 @@ xqc_packet_parse_handshake(xqc_connection_t *c, xqc_packet_in_t *packet_in)
 
                        Retry Packet
  */
-/* TODO: protocol update */
+/* protocol update RFC9000 */
 int
-xqc_gen_retry_packet(unsigned char *dst_buf,
+xqc_gen_retry_packet(xqc_connection_t *conn, unsigned char *dst_buf,
     const unsigned char *dcid, unsigned char dcid_len,
     const unsigned char *scid, unsigned char scid_len,
     const unsigned char *odcid, unsigned char odcid_len,
@@ -929,30 +962,37 @@ xqc_gen_retry_packet(unsigned char *dst_buf,
 {
 
     unsigned char *begin = dst_buf;
-
     unsigned char first_byte = 0xC0;
     first_byte |= XQC_PTYPE_RETRY << 4;
-    first_byte |= odcid_len - 3;
     *dst_buf++ = first_byte;
 
     ver = htonl(ver);
     memcpy(dst_buf, &ver, sizeof(ver));
     dst_buf += sizeof(ver);
 
-    *dst_buf = (dcid_len - 3) << 4;
-    *dst_buf |= scid_len - 3;
-    dst_buf++;
+    *dst_buf++ = dcid_len;
 
     memcpy(dst_buf, dcid, dcid_len);
     dst_buf += dcid_len;
+    *dst_buf++ = scid_len;
     memcpy(dst_buf, scid, scid_len);
     dst_buf += scid_len;
-    memcpy(dst_buf, odcid, odcid_len);
-    dst_buf += odcid_len;
 
     memcpy(dst_buf, token, token_len);
     dst_buf += token_len;
+    
+    uint8_t retry_integrity_tag[XQC_RETRY_INTEGRITY_TAG_LEN] = {0};  
+    size_t retry_integrity_tag_len = XQC_RETRY_INTEGRITY_TAG_LEN;
 
+    xqc_int_t ret = xqc_conn_gen_retry_integrity_tag(conn, odcid, odcid_len, begin, dst_buf - begin,
+                                                     retry_integrity_tag, &retry_integrity_tag_len); 
+
+    if (ret != XQC_OK) {
+        return XQC_ERROR;
+    }
+    
+    memcpy(dst_buf, retry_integrity_tag, retry_integrity_tag_len); 
+    dst_buf += retry_integrity_tag_len;
     return dst_buf - begin;
 }
 
@@ -977,7 +1017,6 @@ xqc_gen_retry_packet(unsigned char *dst_buf,
  *                      Figure 8: Retry Pseudo-Packet
  */
 
-#define RETRY_PSEUDO_PACKET_SIZE (3 * (1 + XQC_MAX_CID_LEN) + 1 + 4 + XQC_MAX_TOKEN_LEN)
 
 static xqc_int_t
 xqc_conn_cal_retry_integrity_tag(xqc_connection_t *conn,
@@ -987,27 +1026,8 @@ xqc_conn_cal_retry_integrity_tag(xqc_connection_t *conn,
     uint8_t *retry_buf = (uint8_t *)packet_in->buf;
     size_t retry_len = packet_in->buf_size - XQC_RETRY_INTEGRITY_TAG_LEN;
 
-    uint8_t pseudo_buf[RETRY_PSEUDO_PACKET_SIZE] = {0};
-    size_t pseudo_len = sizeof(uint8_t) + odcid->cid_len + retry_len;
-
-    uint8_t *dst_buf = pseudo_buf;
-    *dst_buf = odcid->cid_len;
-    dst_buf++;
-    memcpy(dst_buf, odcid->cid_buf, odcid->cid_len);
-    dst_buf += odcid->cid_len;
-    xqc_memcpy(dst_buf, retry_buf, retry_len);
-    dst_buf += retry_len;
-
-    xqc_int_t ret = xqc_tls_cal_retry_integrity_tag(conn->tls,
-                                                    pseudo_buf, pseudo_len,
-                                                    tag_buf, XQC_RETRY_INTEGRITY_TAG_LEN, tag_len);
-    if (ret != XQC_OK || *tag_len != XQC_RETRY_INTEGRITY_TAG_LEN) {
-        xqc_log(conn->log, XQC_LOG_ERROR,
-                "|xqc_tls_cal_retry_integrity_tag error|ret:%d|tag_len:%d|", ret, *tag_len);
-        return ret;
-    } 
-
-    return XQC_OK;
+    return xqc_conn_gen_retry_integrity_tag(conn, odcid->cid_buf, odcid->cid_len, retry_buf,
+                                            retry_len, tag_buf, tag_len);
 }
 
 
@@ -1121,16 +1141,37 @@ Version Negotiation Packet {
 xqc_int_t
 xqc_packet_parse_version_negotiation(xqc_connection_t *c, xqc_packet_in_t *packet_in)
 {
-    /* check original DCID */
+    unsigned char  *pos;
+    unsigned char  *end;
+    uint32_t       *config_version_list;
+    uint32_t        config_version_count;
+    uint32_t        version_chosen;
+    uint32_t        current_wire_version;
+    uint32_t        supported_version_count;
+    uint32_t        supported_version_list[256];
+
+    /*
+     * RFC 9000 Section 17.2.1 requires the VN packet to mirror the
+     * client's Initial CIDs: SCID echoes the client's DCID, DCID
+     * echoes the client's SCID. Validate both directions so that an
+     * off-path attacker cannot forge a VN packet for an unrelated
+     * connection.
+     */
     if (xqc_cid_is_equal(&c->original_dcid, &packet_in->pi_pkt.pkt_scid) != XQC_OK) {
-        xqc_log(c->log, XQC_LOG_ERROR, "|version negotiation pkt SCID error|original_dcid:%s|scid:%s|", 
+        xqc_log(c->log, XQC_LOG_ERROR, "|version negotiation pkt SCID error|original_dcid:%s|scid:%s|",
                 xqc_dcid_str(c->engine, &c->original_dcid), xqc_scid_str(c->engine, &packet_in->pi_pkt.pkt_scid));
         return -XQC_EILLPKT;
     }
 
+    if (xqc_cid_is_equal(&c->initial_scid, &packet_in->pi_pkt.pkt_dcid) != XQC_OK) {
+        xqc_log(c->log, XQC_LOG_ERROR, "|version negotiation pkt DCID error|initial_scid:%s|dcid:%s|",
+                xqc_scid_str(c->engine, &c->initial_scid), xqc_dcid_str(c->engine, &packet_in->pi_pkt.pkt_dcid));
+        return -XQC_EILLPKT;
+    }
+
     xqc_log(c->log, XQC_LOG_DEBUG, "|packet parse|version negotiation|");
-    unsigned char *pos = packet_in->pos;
-    unsigned char *end = packet_in->last;
+    pos = packet_in->pos;
+    end = packet_in->last;
     packet_in->pi_pkt.pkt_type = XQC_PTYPE_VERSION_NEGOTIATION;
 
     /* at least one version is carried in the VN packet */
@@ -1140,28 +1181,28 @@ xqc_packet_parse_version_negotiation(xqc_connection_t *c, xqc_packet_in_t *packe
         return -XQC_EILLPKT;
     }
 
-    /* check available states */
+    /*
+     * RFC 9000 Section 6.2: a VN packet is only valid in response to
+     * the client's initial flight. Any VN observed after the client
+     * has accepted a server response is ignored as required.
+     */
     if (c->conn_state != XQC_CONN_STATE_CLIENT_INITIAL_SENT) {
-        /* drop packet */
         xqc_log(c->log, XQC_LOG_WARN, "|packet_parse_version_negotiation|invalid state|%d|", c->conn_state);
         return -XQC_ESTATE;
     }
 
-    /* check conn type, only client can receive a VN packet */
+    /* only a client is permitted to receive a VN packet */
     if (c->conn_type != XQC_CONN_TYPE_CLIENT) {
         xqc_log(c->log, XQC_LOG_WARN, "|packet_parse_version_negotiation|invalid conn_type|%d|", c->conn_type);
         return -XQC_EPROTO;
     }
 
-    /* check discard vn flag */
-    if (c->discard_vn_flag != 0) {
-        packet_in->pos = packet_in->last;
-        return XQC_OK;
-    }
-
-    /* get Supported Version list */
-    uint32_t supported_version_list[256];
-    uint32_t supported_version_count = 0;
+    /*
+     * Collect the server's Supported Version list. The list is parsed
+     * purely for observability (event log + INFO trace); the abort
+     * decision below does not depend on its contents.
+     */
+    supported_version_count = 0;
     while (XQC_BUFF_LEFT_SIZE(pos, end) >= XQC_PACKET_VERSION_LENGTH) {
         uint32_t version = ntohl(*(uint32_t*)pos);
         if (version) {
@@ -1178,47 +1219,67 @@ xqc_packet_parse_version_negotiation(xqc_connection_t *c, xqc_packet_in_t *packe
     }
     packet_in->pos = packet_in->last;
 
-    /* VN packet returns the same version, nothing to be changed */
-    if (xqc_uint32_list_find(supported_version_list, supported_version_count, c->version) != -1) {
+    /*
+     * RFC 9000 Section 6.2: "A client that supports a version offered
+     * by the server MUST abandon the current connection attempt." If
+     * the server's list happens to include the client's chosen
+     * version, the spec still requires the client to discard the VN
+     * packet and treat it as a stray datagram (do NOT abort), since
+     * it cannot have been generated in response to this Initial.
+     * The list carries wire-format version values, so compare against
+     * the wire value of the client's current version rather than the
+     * internal enum (which only matches by coincidence for V1).
+     */
+    current_wire_version = (c->version < XQC_VERSION_MAX)
+                           ? xqc_proto_version_value[c->version] : 0;
+    if (xqc_uint32_list_find(supported_version_list, supported_version_count,
+                             current_wire_version) != -1)
+    {
+        xqc_log(c->log, XQC_LOG_WARN,
+                "|VN lists current version, discarding per RFC 9000 §6.2"
+                "|version:%ud|wire:0x%xL|",
+                c->version, current_wire_version);
         return XQC_OK;
     }
 
-    /* chose a version both client and server support */
-    uint32_t *config_version_list = c->engine->config->support_version_list;
-    uint32_t config_version_count = c->engine->config->support_version_count;
-    uint32_t version_chosen = 0;
+    config_version_list = c->engine->config->support_version_list;
+    config_version_count = c->engine->config->support_version_count;
+    version_chosen = 0;
     for (uint32_t i = 0; i < supported_version_count; ++i) {
         if (xqc_uint32_list_find(config_version_list, config_version_count, supported_version_list[i]) != -1) {
             version_chosen = supported_version_list[i];
-            xqc_log(c->log, XQC_LOG_INFO, "|version negotiation|version:%ui|", version_chosen);
             break;
         }
     }
-    xqc_log_event(c->log, TRA_VERSION_INFORMATION, config_version_count, config_version_list, supported_version_count,
-                  supported_version_list, version_chosen);
+    xqc_log_event(c->log, TRA_VERSION_INFORMATION, config_version_count, config_version_list,
+                  supported_version_count, supported_version_list, version_chosen);
 
-    /* can't chose a version, abort the connection attempt */
-    if (version_chosen == 0) {
-        xqc_log(c->log, XQC_LOG_ERROR, "|can't negotiate a version|");
-        return -XQC_ESYS;
-    }
+    /*
+     * RFC 9000 Section 6.2 mandates the client MUST abandon the
+     * connection attempt on any valid VN packet, regardless of
+     * whether a mutually supported version exists. The decision to
+     * retry with a different version is explicitly left to the
+     * application (MAY, not MUST), so we surface the abort to the
+     * upper layer and let it decide. Reconnecting in-place would
+     * also be unsafe here because the Initial keys are derived from
+     * the original version and cannot be reused once the version
+     * changes; retransmissions of the in-flight Initial would still
+     * carry the old keys.
+     *
+     * VN packets are not protected, so CONNECTION_CLOSE MUST NOT be
+     * emitted. Move directly to CLOSED to short-circuit the closing
+     * machinery in xqc_conn_immediate_close (which already refuses
+     * to write CONNECTION_CLOSE once state >= DRAINING).
+     */
+    xqc_log(c->log, XQC_LOG_WARN,
+            "|version negotiation: aborting connection attempt|peer_versions:%ud|mutual:%ud|",
+            supported_version_count, version_chosen);
 
-    /* translate version to enum, and set to the connection */
-    for (uint32_t i = XQC_IDRAFT_INIT_VER + 1; i < XQC_IDRAFT_VER_NEGOTIATION; i++) {
-        if (xqc_proto_version_value[i] == version_chosen) {
-            c->version = i;
-            break;
-        }
-    }
+    XQC_CONN_ERR(c, TRA_VERSION_NEGOTIATION_ERROR);
+    c->conn_state = XQC_CONN_STATE_CLOSED;
+    xqc_log_event(c->log, CON_CONNECTION_STATE_UPDATED, c);
 
-    /* TODO: connect the server with the new version, which is not defined by protocol */
-
-    xqc_log(c->log, XQC_LOG_INFO, "|parse version negotiation packet suc|");
-
-    /* set the discard vn flag to avoid a second negotiation */
-    c->discard_vn_flag = 1;
-
-    return XQC_OK;
+    return -XQC_EVERSION_NEGOTIATION;
 }
 
 
@@ -1265,6 +1326,10 @@ xqc_packet_parse_long_header(xqc_connection_t *c,
     uint32_t version = xqc_parse_uint32(pos);
     if (version == 0) {
         /* version negotiation */
+        if (c->conn_type == XQC_CONN_TYPE_SERVER) {
+            xqc_log(c->log, XQC_LOG_DEBUG, "|server receive version negotiation packet|");
+            return -XQC_EILLPKT;
+        }
         type = XQC_PTYPE_VERSION_NEGOTIATION;
     }
     pos += XQC_PACKET_VERSION_LENGTH;
@@ -1324,7 +1389,9 @@ xqc_packet_parse_long_header(xqc_connection_t *c,
     /* check protocol version */
     if (xqc_conn_version_check(c, version) != XQC_OK) {
         xqc_log(c->log, XQC_LOG_INFO, "|version not supported|v:%ui|", version);
-        c->conn_flag |= XQC_CONN_FLAG_VERSION_NEGOTIATION;
+        if (c->conn_type == XQC_CONN_TYPE_SERVER) { /* version negotiation only send by server */
+            c->conn_flag |= XQC_CONN_FLAG_VERSION_NEGOTIATION;
+        }
         return -XQC_EVERSION;
     }
 
@@ -1349,10 +1416,6 @@ xqc_packet_parse_long_header(xqc_connection_t *c,
         xqc_log(c->log, XQC_LOG_ERROR, "|invalid packet type|%ui|", type);
         ret = -XQC_EILLPKT;
         break;
-    }
-
-    if (ret == XQC_OK && c->conn_type == XQC_CONN_TYPE_CLIENT) {
-        c->discard_vn_flag = 1;
     }
 
     return ret;
@@ -1451,7 +1514,7 @@ xqc_int_t
 xqc_packet_parse_stateless_reset(const unsigned char *buf, size_t buf_size,
     const uint8_t **sr_token)
 {
-    if (buf_size <= XQC_STATELESS_RESET_PKT_MIN_LEN) {
+    if (buf_size < XQC_STATELESS_RESET_PKT_MIN_LEN) {
         return -XQC_EILLPKT;
     }
 

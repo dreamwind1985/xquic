@@ -24,6 +24,7 @@ typedef enum {
     XQC_SVR_BID = 1,
     XQC_CLI_UNI = 2,
     XQC_SVR_UNI = 3,
+    XQC_STREAM_TYPE_MAX = 4,
 } xqc_stream_type_t;
 
 
@@ -58,6 +59,12 @@ typedef enum {
     XQC_RECV_STREAM_ST_RESET_READ   = 5,
 } xqc_recv_stream_state_t;
 
+typedef enum {
+    XQC_STREAM_PRI_DEFAULT  = 0,
+    XQC_STREAM_PRI_HIGH     = 1,
+    XQC_STREAM_PRI_NORMAL   = 2,
+} xqc_stream_priority_t;
+
 typedef struct {
     uint64_t                fc_max_stream_data_can_send;
     uint64_t                fc_max_stream_data_can_recv;
@@ -85,6 +92,10 @@ typedef struct xqc_stream_data_in_s {
     uint64_t                next_read_offset;   /* next offset in stream */
     uint64_t                stream_length;
     xqc_bool_t              stream_determined;
+
+    /* buffered out-of-order frame resource tracking (CWE-770 mitigation) */
+    uint64_t                buffered_frame_count;   /* number of buffered frame nodes */
+    uint64_t                buffered_data_bytes;    /* total bytes of buffered frame data */
 } xqc_stream_data_in_t;
 
 
@@ -159,6 +170,12 @@ struct xqc_stream_s {
         uint32_t            recov_pkt_cnt;
         xqc_usec_t          fst_rpr_time;
         xqc_usec_t          last_rpr_time;
+        xqc_int_t           fec_blk_lack_num;       /* number of lack source symbol when receive last repair symbol */
+        xqc_usec_t          fec_blk_lack_time;      /* (first block) block finish time - last received rpr (in block) time */
+        xqc_usec_t          recv_time_with_fec;     /* stream received time with fec recovered packets */
+        xqc_usec_t          final_packet_time;      /* final arrived packets of current stream */
+        xqc_usec_t          stream_recv_time;       /* stream received time */
+        uint32_t            fec_send_rpr_cnt;       /* FEC repair packets sent on current stream */
     } stream_stats;
 
     xqc_path_metrics_t      paths_info[XQC_MAX_PATHS_COUNT];
@@ -170,6 +187,20 @@ struct xqc_stream_s {
 
     char                    begin_trans_state[XQC_STREAM_TRANSPORT_STATE_SZ];
     char                    end_trans_state[XQC_STREAM_TRANSPORT_STATE_SZ];
+    
+    xqc_stream_priority_t   stream_priority;
+    struct {
+        xqc_flag_t          enable_fec;
+
+        /** current fec code rate */
+        float               fec_code_rate;
+        /** symbol number in current stream */
+        xqc_int_t           stream_fec_syb_num;
+
+        xqc_list_head_t    *stream_fec_head;
+        xqc_list_head_t    *stream_fec_tail;
+
+    } stream_fec_ctl;
 };
 
 static inline xqc_stream_type_t
@@ -189,6 +220,8 @@ xqc_stream_is_uni(xqc_stream_id_t stream_id)
 {
     return stream_id & 0x02;
 }
+
+void xqc_stream_set_priority(xqc_stream_t *stream, xqc_stream_priority_t priority);
 
 xqc_stream_t *xqc_create_stream_with_conn (xqc_connection_t *conn, xqc_stream_id_t stream_id,
     xqc_stream_type_t stream_type, xqc_stream_settings_t *settings, void *user_data);
@@ -266,5 +299,8 @@ void xqc_stream_closing(xqc_stream_t *stream, xqc_int_t err);
 
 void xqc_stream_close_discarded_stream(xqc_stream_t *stream);
 
+xqc_bool_t xqc_is_stream_finished(xqc_stream_t *stream);
+
+void xqc_record_stream_state(xqc_stream_t *stream);
 #endif /* _XQC_STREAM_H_INCLUDED_ */
 

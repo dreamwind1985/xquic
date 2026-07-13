@@ -21,6 +21,7 @@
 #include "src/transport/xqc_utils.h"
 #include "src/transport/xqc_datagram.h"
 #include "src/transport/xqc_reinjection.h"
+#include "src/transport/xqc_transport_params.h"
 
 int 
 xqc_send_ctl_may_remove_unacked_dgram(xqc_connection_t *conn, xqc_packet_out_t *po)
@@ -700,7 +701,10 @@ xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc_
             xqc_conn_increase_unacked_stream_ref(send_ctl->ctl_conn, packet_out);
         }
 
-        if (XQC_IS_ACK_ELICITING(packet_out->po_frame_types)) {
+        if (XQC_IS_ACK_ELICITING(packet_out->po_frame_types)
+            /* do not set loss detection timer for PMTUD probing */
+            && !(packet_out->po_flag & XQC_POF_PMTUD_PROBING)) 
+        {
             xqc_send_ctl_set_loss_detection_timer(send_ctl);
         }
 
@@ -775,15 +779,43 @@ xqc_send_ctl_on_packet_sent(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc_
     }
 }
 
+
+xqc_int_t 
+xqc_send_ctl_detect_optimistic_ack_attack(xqc_send_ctl_t *send_ctl, 
+    xqc_pn_ctl_t *pn_ctl, xqc_ack_info_t *const ack_info, xqc_usec_t ack_recv_time)
+{
+    xqc_connection_t *conn = send_ctl->ctl_conn;
+    xqc_pktno_range_t *range = NULL;
+    xqc_pkt_num_space_t pns = ack_info->pns;
+    int i;
+    
+    if (!conn->conn_settings.disable_pn_skipping
+        /* only check application data */
+        && pns == XQC_PNS_APP_DATA 
+        /* if ack is received after the next skip chance, 
+           it is unlikely to be optimistic ack */
+        && ack_recv_time < pn_ctl->ctl_next_skip_chance) 
+    {
+        for (i = ack_info->n_ranges - 1; i >= 0; i--) {
+            range = &ack_info->ranges[i];
+            /* check if skipped packet numbers are acked */
+            if (xqc_max(range->low, pn_ctl->ctl_skipped_pn_low) <= xqc_min(range->high, pn_ctl->ctl_skipped_pn_high)) {
+                xqc_log(conn->log, XQC_LOG_ERROR, "|optimistic ack attack detected|ack_range:%ui-%ui|skipped_range:%ui-%ui|", range->low, range->high, pn_ctl->ctl_skipped_pn_low, pn_ctl->ctl_skipped_pn_high);
+                return -XQC_EPROTO;
+            }
+        }
+    }
+
+    return XQC_OK;
+}
+
+
 /**
  * OnAckReceived
  */
 int
 xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc_send_queue_t *send_queue, xqc_ack_info_t *const ack_info, xqc_usec_t ack_recv_time, xqc_bool_t ack_on_same_path)
 {
-    /* ack info里包含的packet不一定会是send_ctl这条路径发出的 */
-    /* info里的largest ack 不一定是send_ctl这条路径的largest ack */
-
     xqc_connection_t *conn = send_ctl->ctl_conn;
 
     xqc_packet_out_t *packet_out;
@@ -792,13 +824,18 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
     xqc_pkt_num_space_t pns = ack_info->pns;
 
     /* 标记ack info里是否有这条路径发出的包 */
-    unsigned char has_acked = 0, update_largest_ack = 0;
+    unsigned char has_acked = 0, update_largest_ack = 0, ignore_rtt = 0;
     unsigned char has_ack_eliciting = 0, spurious_loss_detected = 0;
     xqc_packet_number_t frame_largest_ack = ack_info->ranges[0].high;
     xqc_packet_number_t spurious_loss_pktnum = 0;
     xqc_usec_t spurious_loss_sent_time = 0;
     unsigned char need_del_record = 0;
     int stream_frame_acked = 0;
+
+    if (xqc_send_ctl_detect_optimistic_ack_attack(send_ctl, pn_ctl, ack_info, ack_recv_time) < 0) {
+        XQC_CONN_ERR(conn, TRA_PROTOCOL_VIOLATION);
+        return -XQC_EPROTO;
+    }
 
     xqc_packet_number_t largest_acked_ack = xqc_ack_sent_record_on_ack(&pn_ctl->ack_sent_record[pns], ack_info);
     if (largest_acked_ack > pn_ctl->ctl_largest_acked_ack[pns]) {
@@ -856,8 +893,12 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
                 send_ctl->ctl_largest_acked[pns] == XQC_MAX_UINT64_VALUE)
 			{
                 update_largest_ack = 1;
+                ignore_rtt = 0;
                 send_ctl->ctl_largest_acked[pns] = packet_out->po_pkt.pkt_num;
                 send_ctl->ctl_largest_acked_sent_time[pns] = packet_out->po_sent_time;
+                if (packet_out->po_flag & XQC_POF_PMTUD_PROBING) {
+                    ignore_rtt = 1;
+                }
             }
 
             // 更新 largest_ack_both
@@ -895,6 +936,11 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
             }
 
             xqc_send_ctl_on_packet_acked(send_ctl, packet_out, ack_recv_time, 1);
+            
+            if (packet_out->po_used_size > conn->max_acked_po_size) {
+                conn->max_acked_po_size = packet_out->po_used_size + XQC_TLS_AEAD_OVERHEAD_MAX_LEN;
+            }
+            
 
             xqc_send_queue_maybe_remove_unacked(packet_out, send_queue, NULL);
 
@@ -913,10 +959,16 @@ xqc_send_ctl_on_ack_received(xqc_send_ctl_t *send_ctl, xqc_pn_ctl_t *pn_ctl, xqc
     }
 
     if (update_largest_ack && has_ack_eliciting && ack_on_same_path) {
-        /* 更新 ctl_latest_rtt */
-        send_ctl->ctl_latest_rtt = ack_recv_time - send_ctl->ctl_largest_acked_sent_time[pns];
-        /* 更新rtt */
-        xqc_send_ctl_update_rtt(send_ctl, &send_ctl->ctl_latest_rtt, ack_info->ack_delay);
+        if (!ignore_rtt) {
+            /* 更新 ctl_latest_rtt */
+            send_ctl->ctl_latest_rtt = ack_recv_time - send_ctl->ctl_largest_acked_sent_time[pns];
+            /* 更新rtt */
+            xqc_send_ctl_update_rtt(send_ctl, &send_ctl->ctl_latest_rtt, ack_info->ack_delay);
+
+        } else {
+            xqc_log(conn->log, XQC_LOG_DEBUG, "|ignore_rtt:%ui|", ack_recv_time - send_ctl->ctl_largest_acked_sent_time[pns]);
+        }
+
     }
 
     /* TODO: ECN */
@@ -1104,8 +1156,19 @@ xqc_send_ctl_update_rtt(xqc_send_ctl_t *send_ctl, xqc_usec_t *latest_rtt, xqc_us
     } else {
         send_ctl->ctl_minrtt = xqc_min(*latest_rtt, send_ctl->ctl_minrtt);
 
+        /*
+         * RFC 9002 5.3: ack_delay MUST be clamped by max_ack_delay before
+         * being subtracted from latest_rtt. Until the handshake is
+         * confirmed the peer is required to use the default max_ack_delay
+         * (RFC 9000 18.2), so use that constant; after confirmation the
+         * negotiated value from the peer's transport parameters applies.
+         */
         if (xqc_conn_is_handshake_confirmed(send_ctl->ctl_conn)) {
-            ack_delay = xqc_min(ack_delay, send_ctl->ctl_conn->remote_settings.max_ack_delay * 1000);
+            ack_delay = xqc_min(ack_delay,
+                                send_ctl->ctl_conn->remote_settings.max_ack_delay * 1000);
+
+        } else {
+            ack_delay = xqc_min(ack_delay, XQC_DEFAULT_MAX_ACK_DELAY * 1000);
         }
 
         /* Adjust for ack delay if it's plausible. */
@@ -1353,8 +1416,29 @@ xqc_send_ctl_detect_lost(xqc_send_ctl_t *send_ctl, xqc_send_queue_t *send_queue,
         {
             /* For loss-based CCs, it means we are gonna slow start again. */
             send_ctl->ctl_max_bytes_in_flight = 0;
+
+            /*
+             * RFC 9002 Section 5.2: "Endpoints SHOULD set the min_rtt to
+             * the newest RTT sample after persistent congestion is
+             * established." Reset srtt/rttvar/first_rtt_sample_time
+             * alongside min_rtt so the next RTT sample re-seeds the
+             * estimator via the first-sample branch in update_rtt; this
+             * prevents stale srtt/rttvar from inflating the PTO and the
+             * persistent-congestion duration formula after a disruptive
+             * path event. ctl_latest_rtt is preserved for debug.
+             * Reset is per-path because send_ctl is per-path.
+             */
+            xqc_log(conn->log, XQC_LOG_DEBUG,
+                    "|OnLostDetection|persistent_congestion|reset_rtt"
+                    "|old_srtt:%ui|old_rttvar:%ui|old_minrtt:%ui|",
+                    send_ctl->ctl_srtt, send_ctl->ctl_rttvar,
+                    send_ctl->ctl_minrtt);
+            send_ctl->ctl_minrtt = XQC_MAX_UINT32_VALUE;
+            send_ctl->ctl_srtt = send_ctl->ctl_conn->conn_settings.initial_rtt;
+            send_ctl->ctl_rttvar = send_ctl->ctl_srtt / 2;
+            send_ctl->ctl_first_rtt_sample_time = 0;
+
             /* we reset BBR's cwnd here */
-            xqc_log(conn->log, XQC_LOG_DEBUG, "|OnLostDetection|%s|", "Persistent congestion occurs");
             send_ctl->ctl_cong_callback->xqc_cong_ctl_reset_cwnd(send_ctl->ctl_cong);
         }
 
@@ -1546,7 +1630,7 @@ xqc_send_ctl_on_packet_acked(xqc_send_ctl_t *send_ctl,
             }
         }
 
-        /* TODO: fix NEW_CID_RECEIVED */
+        
         if (packet_out->po_frame_types & (XQC_FRAME_BIT_NEW_CONNECTION_ID | XQC_FRAME_BIT_MP_NEW_CONNECTION_ID)) {
             xqc_cid_set_on_cid_acked(&conn->scid_set, packet_out->po_new_cid_path, packet_out->po_new_cid_seq);
         }
@@ -1845,4 +1929,38 @@ xqc_send_ctl_get_est_bw(xqc_send_ctl_t *send_ctl)
 uint64_t
 xqc_send_ctl_get_pacing_rate(xqc_send_ctl_t *send_ctl) {
     return xqc_pacing_rate_calc(&send_ctl->ctl_pacing);
+}
+
+
+void 
+xqc_send_ctl_set_next_pn_for_packet(xqc_connection_t *conn, xqc_pn_ctl_t *pn_ctl,  
+    xqc_packet_out_t *packet_out, xqc_usec_t current_time)
+{
+    if (conn->conn_settings.disable_pn_skipping) {
+        packet_out->po_pkt.pkt_num = pn_ctl->ctl_packet_number[packet_out->po_pkt.pkt_pns]++;
+
+    } else {
+        packet_out->po_pkt.pkt_num = pn_ctl->ctl_packet_number[packet_out->po_pkt.pkt_pns];
+        if (packet_out->po_pkt.pkt_num > 0 
+            && packet_out->po_pkt.pkt_pns == XQC_PNS_APP_DATA) 
+        {
+            /* randomly skip some packet numbers to avoid optimistic ack attacks */
+            if (current_time > pn_ctl->ctl_next_skip_chance) {
+                /* we have 20% chance to skip some packet numbers */
+                /* we must skip some packet numbers if pn has been increased up to 2^10 since the last skip */
+                if (current_time % 10 < 2
+                    || packet_out->po_pkt.pkt_num > (pn_ctl->ctl_skipped_pn_high + 1024)) 
+                {
+                    /* the number of skipped packet numbers is also random */
+                    pn_ctl->ctl_skipped_pn_low = packet_out->po_pkt.pkt_num;
+                    pn_ctl->ctl_skipped_pn_high = pn_ctl->ctl_skipped_pn_low + current_time % 7;
+                    packet_out->po_pkt.pkt_num = pn_ctl->ctl_skipped_pn_high + 1;
+                    /* we should keep this range for 3xPTO to detect malicious ACKs */
+                    pn_ctl->ctl_next_skip_chance = current_time + 3 * xqc_conn_get_max_pto(conn);
+                    xqc_log(conn->log, XQC_LOG_DEBUG, "|optimistic ack detection|skipped_range:%ui-%ui|next_skip_chance:%ui|current_time:%ui|", pn_ctl->ctl_skipped_pn_low, pn_ctl->ctl_skipped_pn_high, pn_ctl->ctl_next_skip_chance, current_time);
+                }
+            }
+        }
+        pn_ctl->ctl_packet_number[packet_out->po_pkt.pkt_pns] = packet_out->po_pkt.pkt_num + 1;
+    }
 }

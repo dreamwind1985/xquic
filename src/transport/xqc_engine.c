@@ -27,7 +27,7 @@
 #include "src/transport/xqc_reinjection.h"
 #include "src/transport/xqc_packet_out.h"
 
-
+#define XQC_DEFAULT_TOKEN_KEY       "xquic token key"
 extern const xqc_qpack_ins_cb_t xqc_h3_qpack_ins_cb;
 
 xqc_config_t default_client_config = {
@@ -132,6 +132,22 @@ xqc_set_config(xqc_config_t *dst, const xqc_config_t *src)
             memcpy(dst->reset_token_key, src->reset_token_key, src->reset_token_keylen);
         }
     }
+   
+    for (int i = 0; i < XQC_TOKEN_MAX_KEY_VERSION; i++) {
+        int tk_len = src->tk_len_list[i];
+        if (tk_len > 0 && tk_len < XQC_TOKEN_MAX_KEY_LEN) {
+            dst->tk_len_list[i] = tk_len;
+            memcpy(dst->token_key_list[i], src->token_key_list[i], tk_len);
+        } else {
+            dst->tk_len_list[i] = sizeof(XQC_DEFAULT_TOKEN_KEY) - 1;
+            memcpy(dst->token_key_list[i], XQC_DEFAULT_TOKEN_KEY, dst->tk_len_list[i]);
+        }
+    }
+    if (src->cur_tk_index < XQC_TOKEN_MAX_KEY_VERSION) {
+        dst->cur_tk_index = src->cur_tk_index;
+    } else {
+        return XQC_ERROR;
+    }
 
     dst->cid_negotiate = src->cid_negotiate;
     dst->cfg_log_level = src->cfg_log_level;
@@ -143,6 +159,15 @@ xqc_set_config(xqc_config_t *dst, const xqc_config_t *src)
     dst->enable_h3_ext = src->enable_h3_ext;
 
     return XQC_OK;
+}
+
+void
+xqc_engine_initial_token_secret(unsigned char *src, uint16_t src_len, unsigned char *dst)
+{
+    xqc_md5_t ctx;
+    xqc_md5_init(&ctx);
+    xqc_md5_update(&ctx, src, src_len);
+    xqc_md5_final(dst, &ctx);
 }
 
 
@@ -161,7 +186,19 @@ xqc_engine_get_default_config(xqc_config_t *config, xqc_engine_type_t engine_typ
 xqc_int_t
 xqc_engine_set_config(xqc_engine_t *engine, const xqc_config_t *engine_config)
 {
-    return xqc_set_config(engine->config, engine_config);
+    xqc_int_t ret = xqc_set_config(engine->config, engine_config);
+    if (ret != XQC_OK) {
+        return ret;
+    }
+    if (engine->eng_type == XQC_ENGINE_SERVER) {
+        engine->cur_ts_index = engine->config->cur_tk_index & XQC_TOKEN_VERSION_MASK;
+        for (int i = 0; i < XQC_TOKEN_MAX_KEY_VERSION; i++) { 
+            xqc_engine_initial_token_secret(engine->config->token_key_list[i], 
+                                            engine->config->tk_len_list[i],
+                                            engine->token_secret_list[i]);
+        }
+    }
+    return XQC_OK;
 }
 
 
@@ -279,7 +316,6 @@ xqc_engine_conns_hash_find(xqc_engine_t *engine, const xqc_cid_t *cid, char type
     }
 
     uint64_t hash;
-
     xqc_str_t str;
     str.data = (unsigned char *)cid->cid_buf;
     str.len = cid->cid_len;
@@ -454,8 +490,8 @@ xqc_engine_create(xqc_engine_type_t engine_type,
     if (engine->rand_generator == NULL) {
         goto fail;
     }
-
     xqc_get_random(engine->rand_generator, sipkey, sizeof(sipkey));
+    
 
     engine->conns_hash = xqc_engine_conns_hash_create(engine->config, sipkey, sizeof(sipkey), engine->log);
     if (engine->conns_hash == NULL) {
@@ -732,9 +768,9 @@ xqc_engine_process_conn(xqc_connection_t *conn, xqc_usec_t now)
     XQC_CHECK_IMMEDIATE_CLOSE();
 
     if (conn->ack_flag) {
-        ret = xqc_write_ack_or_mp_ack_to_packets(conn);
+        ret = xqc_write_ack_or_mp_ack_or_ext_ack_to_packets(conn);
         if (ret) {
-            xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_write_ack_or_mp_ack_to_packets error|");
+            xqc_log(conn->log, XQC_LOG_ERROR, "|xqc_write_ack_or_mp_ack_or_ext_ack_to_packets error|");
             XQC_CONN_ERR(conn, TRA_INTERNAL_ERROR);
         }
     }
@@ -1011,7 +1047,7 @@ xqc_engine_handle_stateless_reset(xqc_engine_t *engine,
     }
 
     hash = xqc_siphash_get_hash(&engine->conns_hash_sr_token->siphash_ctx,
-                                sr_token, XQC_STATELESS_RESET_TOKENLEN);
+                                sr_token, XQC_STATELESS_RESET_TOKENLEN); 
     str.data = (unsigned char *)sr_token;
     str.len = XQC_STATELESS_RESET_TOKENLEN;
 
@@ -1202,6 +1238,7 @@ process:
 
     /* NAT rebinding */
     if (engine->eng_type == XQC_ENGINE_SERVER
+        && (conn->conn_flag & XQC_CONN_FLAG_SERVER_ACCEPT)
         && (peer_addr != NULL && peer_addrlen != 0)
         && !xqc_is_same_addr_as_any_path(conn, peer_addr))
     {
@@ -1465,6 +1502,10 @@ xqc_engine_free_alpn_list(xqc_engine_t *engine)
         alpn_reg = xqc_list_entry(pos, xqc_alpn_registration_t, head);
 
         if (alpn_reg) {
+            if (alpn_reg->alp_ctx) {
+                xqc_free(alpn_reg->alp_ctx);
+            }
+            
             if (alpn_reg->alpn) {
                 xqc_free(alpn_reg->alpn);
             }
@@ -1478,9 +1519,16 @@ xqc_engine_free_alpn_list(xqc_engine_t *engine)
 xqc_bool_t
 xqc_engine_is_sendmmsg_on(xqc_engine_t *engine, xqc_connection_t *conn)
 {
-    return engine->config->sendmmsg_on
-        && (engine->transport_cbs.write_mmsg || engine->transport_cbs.write_mmsg_ex)
-        && (!conn->conn_settings.disable_send_mmsg);
+    if (engine->eng_type == XQC_ENGINE_SERVER) {
+        return engine->config->sendmmsg_on
+               && (engine->transport_cbs.write_mmsg || engine->transport_cbs.write_mmsg_ex)
+               && (!conn->conn_settings.disable_send_mmsg)
+               && (conn->conn_flag & XQC_CONN_FLAG_SERVER_ACCEPT);
+    } else {
+        return engine->config->sendmmsg_on
+               && (engine->transport_cbs.write_mmsg || engine->transport_cbs.write_mmsg_ex)
+               && (!conn->conn_settings.disable_send_mmsg);
+    }
 }
 
 

@@ -581,7 +581,7 @@ xqc_bbr_enter_probe_bw(xqc_bbr_t *bbr, xqc_sample_t *sampler)
 {
     bbr->mode = BBR_PROBE_BW;
     bbr->cwnd_gain = xqc_bbr_cwnd_gain;
-    bbr->cycle_idx = xqc_random() % (XQC_BBR_CYCLE_LENGTH - 1);
+    bbr->cycle_idx = (uint32_t)(xqc_random() % (XQC_BBR_CYCLE_LENGTH - 1));
     bbr->cycle_idx = bbr->cycle_idx == 0 ? bbr->cycle_idx : bbr->cycle_idx + 1;
     bbr->pacing_gain = xqc_bbr_get_pacing_gain(bbr, bbr->cycle_idx);
     bbr->cycle_start_stamp = sampler->now;
@@ -797,7 +797,7 @@ xqc_bbr_modulate_cwnd_for_recovery(xqc_bbr_t *bbr, xqc_sample_t *sampler)
             "|before ModulateCwndForRecovery|cwnd:%ud"
             "|packet_lost:%ud|acked:%ud|po_sent_time:%ui"
             "|recovery:%ud|recovery_start:%ui|packet_conservation:%ud|"
-            "next_round_delivered:%ud|",
+            "next_round_delivered:%ui|",
             bbr->congestion_window, sampler->loss, sampler->acked, 
             sampler->po_sent_time, bbr->recovery_mode, bbr->recovery_start_time,
             bbr->packet_conservation, bbr->next_round_delivered);
@@ -848,7 +848,7 @@ xqc_bbr_modulate_cwnd_for_recovery(xqc_bbr_t *bbr, xqc_sample_t *sampler)
             "|after ModulateCwndForRecovery|cwnd:%ud"
             "|packet_lost:%ud|acked:%ud|po_sent_time:%ui"
             "|recovery:%ud|recovery_start:%ui|packet_conservation:%ud|"
-            "next_round_delivered:%ud|",
+            "next_round_delivered:%ui|",
             bbr->congestion_window, sampler->loss, sampler->acked, 
             sampler->po_sent_time, bbr->recovery_mode, bbr->recovery_start_time,
             bbr->packet_conservation, bbr->next_round_delivered);

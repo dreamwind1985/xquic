@@ -1,6 +1,6 @@
 # Copyright (c) 2022, Alibaba Group Holding Limited
 
-cmake_minimum_required (VERSION 2.6)
+cmake_minimum_required (VERSION 3.5)
 project (xquic)
 
 set (xquic_VERSION_MAJOR 0)
@@ -19,6 +19,7 @@ option (XQC_ENABLE_FEC "enable fec" OFF)
 option (XQC_ENABLE_XOR "enable fec scheme xor" OFF)
 option (XQC_ENABLE_RSC "enable fec scheme reed-solomon code" OFF)
 option (XQC_ENABLE_PKM "enable fec scheme packet mask" OFF)
+option (XQC_PING_ATTACK_PROTECT "enable ping attack protection" OFF)
 
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Release)
@@ -112,10 +113,14 @@ endif()
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -g -O2 -std=gnu11 -Wall ${CMAKE_C_FLAGS_OPTION} -DNDEBUG_PRINT -DNPRINT_MALLOC ")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS} -g -O0 -std=gnu11 -Wall ${CMAKE_C_FLAGS_OPTION} -DNDEBUG_PRINT -DNPRINT_MALLOC -DXQC_DEBUG ")
 
+if(ASAN)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -w -fsanitize=address -fsanitize-address-use-after-scope -fno-omit-frame-pointer")
+endif()
+
 
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")
     add_definitions(-DXQC_SYS_WINDOWS=1)
-    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /Zi")
+    set(CMAKE_C_FLAGS_OPTION " ")
 endif()
 
 
@@ -131,7 +136,7 @@ include_directories(include
     ${CMAKE_SOURCE_DIR}
 )
 
-option (XQC_PRINT_SECRET "enable TLS secret printing" OFF)
+
 
 # print tls traffic secret in keylog
 if(XQC_PRINT_SECRET)
@@ -172,6 +177,9 @@ if(XQC_ENABLE_TESTING)
     #add_subdirectory(mini)
 endif(XQC_ENABLE_TESTING)
 
+if(XQC_ENABLE_MOQ)
+    add_subdirectory(moq)
+endif()
 
 # http3/qpack source
 set(
@@ -222,6 +230,7 @@ set(
     "src/transport/xqc_quic_lb.c"
     "src/transport/xqc_timer.c"
     "src/transport/xqc_reinjection.c"
+    "src/transport/xqc_recv_timestamps_info.c"
     "src/transport/reinjection_control/xqc_reinj_default.c"
     "src/transport/reinjection_control/xqc_reinj_deadline.c"
     "src/transport/reinjection_control/xqc_reinj_dgram.c"
@@ -396,7 +405,7 @@ add_library(
     ${XQC_SOURCE}
 )
 
-if(PLATFORM MATCHES "mac")
+if(APPLE OR PLATFORM MATCHES "mac")
     target_link_libraries(
         xquic
         "-ldl -Wl,-all_load"

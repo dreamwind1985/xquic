@@ -65,6 +65,13 @@ typedef struct xqc_pn_ctl_s {
     /* record ack sent */
     xqc_ack_sent_record_t       ack_sent_record[XQC_PNS_N];
 
+
+    /* fields are used for detecting optimistic ack attacks */
+    /* we skip pn in [ctl_skipped_pn_low, ctl_skipped_pn_high] */
+    xqc_packet_number_t         ctl_skipped_pn_low;
+    xqc_packet_number_t         ctl_skipped_pn_high;
+    xqc_usec_t                  ctl_next_skip_chance;
+
 } xqc_pn_ctl_t;
 
 typedef struct xqc_send_ctl_s {
@@ -168,11 +175,21 @@ typedef struct xqc_send_ctl_s {
 } xqc_send_ctl_t;
 
 
+/*
+ * Per-path connection-level PTO estimate used by callers that do not need
+ * pns granularity (e.g. xqc_conn_get_max_pto). Per RFC 9002 6.2.1, PTO must
+ * be computed using the peer-reported max_ack_delay, hence remote_settings.
+ *
+ * The pns-specific Initial/Handshake rule (max_ack_delay term must be 0
+ * before handshake confirmation) is enforced by
+ * xqc_send_ctl_get_pto_time_and_space; callers needing that granularity
+ * must use it instead. See xqc_send_ctl.c for the canonical formula.
+ */
 static inline xqc_usec_t
 xqc_send_ctl_calc_pto(xqc_send_ctl_t *send_ctl)
 {
     return send_ctl->ctl_srtt + xqc_max(4 * send_ctl->ctl_rttvar, XQC_kGranularity * 1000)
-        + send_ctl->ctl_conn->local_settings.max_ack_delay * 1000;
+        + send_ctl->ctl_conn->remote_settings.max_ack_delay * 1000;
 }
 
 
@@ -272,5 +289,11 @@ xqc_packet_number_t xqc_send_ctl_get_pkt_num_gap(xqc_send_ctl_t *send_ctl, xqc_p
 /* bytes per second */
 uint64_t xqc_send_ctl_get_est_bw(xqc_send_ctl_t *send_ctl);
 uint64_t xqc_send_ctl_get_pacing_rate(xqc_send_ctl_t *send_ctl);
+
+xqc_int_t xqc_send_ctl_detect_optimistic_ack_attack(xqc_send_ctl_t *send_ctl, 
+    xqc_pn_ctl_t *pn_ctl, xqc_ack_info_t *const ack_info, xqc_usec_t ack_recv_time);
+
+void xqc_send_ctl_set_next_pn_for_packet(xqc_connection_t *conn, xqc_pn_ctl_t *pn_ctl,  
+    xqc_packet_out_t *packet_out, xqc_usec_t current_time);
 
 #endif /* _XQC_SEND_CTL_H_INCLUDED_ */

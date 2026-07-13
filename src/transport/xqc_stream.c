@@ -16,7 +16,7 @@
 #include "src/transport/xqc_utils.h"
 #include "src/transport/xqc_pacing.h"
 #include "src/tls/xqc_tls.h"
-
+#include "src/transport/xqc_fec.h"
 
 static xqc_stream_id_t
 xqc_gen_stream_id(xqc_connection_t *conn, xqc_stream_type_t type)
@@ -497,28 +497,32 @@ xqc_stream_do_create_flow_ctl(xqc_connection_t *conn, xqc_stream_id_t stream_id,
     } else { /* receiving part */
         stream_type = xqc_get_stream_type(stream_id);
         if (stream_type == XQC_CLI_BID || stream_type == XQC_SVR_BID) {
-            if (stream_id >= 4 * conn->conn_flow_ctl.fc_max_streams_bidi_can_recv + stream_type) {
-                xqc_log(conn->log, XQC_LOG_ERROR, "|exceed max_streams_bidi_can_recv:%ui|",
-                        conn->conn_flow_ctl.fc_max_streams_bidi_can_recv);
+            if (stream_id >= (4 * conn->conn_flow_ctl.fc_max_streams_bidi_can_recv + stream_type)) {
+                xqc_log(conn->log, XQC_LOG_ERROR, "|exceed max_streams_bidi_can_recv|stream_id:%ui|can_recv:%ui|",
+                        stream_id >> 2, conn->conn_flow_ctl.fc_max_streams_bidi_can_recv);
                 XQC_CONN_ERR(conn, TRA_STREAM_LIMIT_ERROR);
                 return -XQC_EPROTO;
             }
             /* increase max streams */
-            if ((stream_id >> 2) >= conn->conn_flow_ctl.fc_max_streams_bidi_can_recv / 2) {
-                conn->conn_flow_ctl.fc_max_streams_bidi_can_recv += conn->local_settings.max_streams_bidi;
+            if (((stream_id >> 2) + conn->local_settings.max_streams_bidi/2) >= conn->conn_flow_ctl.fc_max_streams_bidi_can_recv
+                && conn->conn_flow_ctl.fc_max_streams_bidi_can_recv < conn->conn_flow_ctl.fc_max_streams_bidi_recv_wind)
+            {
+                conn->conn_flow_ctl.fc_max_streams_bidi_can_recv = conn->conn_flow_ctl.fc_max_streams_bidi_recv_wind; 
                 xqc_write_max_streams_to_packet(conn, conn->conn_flow_ctl.fc_max_streams_bidi_can_recv, 1);
             }
 
         } else {
-            if (stream_id >= 4 * conn->conn_flow_ctl.fc_max_streams_uni_can_recv + stream_type) {
-                xqc_log(conn->log, XQC_LOG_ERROR, "|exceed max_streams_uni_can_recv:%ui|",
-                        conn->conn_flow_ctl.fc_max_streams_uni_can_recv);
+            if (stream_id >= (4 * conn->conn_flow_ctl.fc_max_streams_uni_can_recv + stream_type)) {
+                xqc_log(conn->log, XQC_LOG_ERROR, "|exceed max_streams_uni_can_recv|stream_id:%ui|can_recv:%ui|",
+                        stream_id >> 2, conn->conn_flow_ctl.fc_max_streams_uni_can_recv);
                 XQC_CONN_ERR(conn, TRA_STREAM_LIMIT_ERROR);
                 return -XQC_EPROTO;
             }
             /* increase max streams */
-            if ((stream_id >> 2) >= conn->conn_flow_ctl.fc_max_streams_uni_can_recv / 2) {
-                conn->conn_flow_ctl.fc_max_streams_uni_can_recv += conn->local_settings.max_streams_uni;
+            if (((stream_id >> 2) + conn->local_settings.max_streams_uni/2) >= conn->conn_flow_ctl.fc_max_streams_uni_can_recv
+                && conn->conn_flow_ctl.fc_max_streams_uni_can_recv < conn->conn_flow_ctl.fc_max_streams_uni_recv_wind)
+            {
+                conn->conn_flow_ctl.fc_max_streams_uni_can_recv = conn->conn_flow_ctl.fc_max_streams_uni_recv_wind;
                 xqc_write_max_streams_to_packet(conn, conn->conn_flow_ctl.fc_max_streams_uni_can_recv, 0);
             }
         }
@@ -666,13 +670,18 @@ xqc_create_stream_with_conn(xqc_connection_t *conn, xqc_stream_id_t stream_id,
             stream->stream_flag |= XQC_STREAM_FLAG_DISCARDED;
         }
     }
-
     return stream;
 
 error:
 
     xqc_destroy_stream(stream);
     return NULL;
+}
+
+void
+xqc_stream_set_priority(xqc_stream_t *stream, xqc_stream_priority_t priority)
+{
+    stream->stream_priority = priority;
 }
 
 void
@@ -699,21 +708,84 @@ xqc_stream_id(xqc_stream_t *stream)
     return stream->stream_id;
 }
 
+xqc_bool_t
+xqc_is_stream_finished(xqc_stream_t *stream)
+{
+    xqc_bool_t check_send_state, check_recv_state;
+    xqc_conn_type_t conn_type = stream->stream_conn->conn_type;
+
+    if (stream->stream_type == XQC_CLI_BID || stream->stream_type == XQC_SVR_BID) {
+        check_send_state = XQC_TRUE;
+        check_recv_state = XQC_TRUE;
+    } else if ((stream->stream_type == XQC_CLI_UNI && conn_type == XQC_CONN_TYPE_CLIENT)
+               || (stream->stream_type == XQC_SVR_UNI && conn_type == XQC_CONN_TYPE_SERVER)) {
+        /* Uni Stream Send side */
+        check_send_state = XQC_TRUE;
+        check_recv_state = XQC_FALSE;
+    } else {
+        /* Uni Stream Recv side */
+        check_send_state = XQC_FALSE;
+        check_recv_state = XQC_TRUE;
+    }
+
+    if (check_send_state && check_recv_state) {
+        return (stream->stream_state_send == XQC_SEND_STREAM_ST_DATA_RECVD)
+                && (stream->stream_state_recv == XQC_RECV_STREAM_ST_DATA_READ);
+    } else if (check_send_state) {
+        return stream->stream_state_send == XQC_SEND_STREAM_ST_DATA_RECVD;
+    } else {
+        return stream->stream_state_recv == XQC_RECV_STREAM_ST_DATA_READ;
+    }
+}
+
+void
+xqc_record_stream_state(xqc_stream_t *stream)
+{
+    xqc_int_t   enable_stream_num, calculated_frames;
+    xqc_usec_t  curr_recv_delay, curr_fec_recv_opt;
+    xqc_usec_t  curr_close_delay;
+
+#define __calc_delay(a, b) ((a && b && (a > b))? (a) - (b) : 0)
+    calculated_frames = stream->stream_conn->conn_calculated_frames++;
+    curr_close_delay = __calc_delay(stream->stream_stats.close_time, stream->stream_stats.create_time);          
+    curr_recv_delay = __calc_delay(stream->stream_stats.stream_recv_time, stream->stream_stats.create_time);
+    stream->stream_conn->conn_avg_close_delay = xqc_update_avg_time(curr_close_delay, stream->stream_conn->conn_avg_close_delay, calculated_frames);
+    stream->stream_conn->conn_latest_close_delay = curr_close_delay;
+    stream->stream_conn->conn_avg_recv_delay = xqc_update_avg_time(curr_recv_delay, stream->stream_conn->conn_avg_recv_delay, calculated_frames);
+
+#undef __calc_delay
+}
+
 void
 xqc_destroy_stream(xqc_stream_t *stream)
 {
+    xqc_int_t   finished_streams;
+
+#define __calc_delay(a, b) ((a && b && (a > b))? (a) - (b) : 0)
+
     xqc_log(stream->stream_conn->log, XQC_LOG_DEBUG, "|send_state:%d|recv_state:%d|stream_id:%ui|stream_type:%d|",
             stream->stream_state_send, stream->stream_state_recv, stream->stream_id, stream->stream_type);
 
-    if ((stream->stream_state_send == XQC_SEND_STREAM_ST_DATA_RECVD)
-        && (stream->stream_state_recv == XQC_RECV_STREAM_ST_DATA_READ))
-    {
+    if (xqc_is_stream_finished(stream)) {
         if(stream->stream_conn) {
-            stream->stream_conn->finished_streams++;
+            finished_streams = stream->stream_conn->finished_streams++;
+#ifdef XQC_ENABLE_FEC
+            if (stream->stream_conn->fec_ctl 
+                && ((stream->stream_fec_ctl.enable_fec
+                    || stream->stream_stats.recov_pkt_cnt > 0
+                    ))) 
+            {
+                xqc_record_fec_state(stream);
+            }
+#endif
         }
     }
 
     xqc_stream_record_trans_state(stream, XQC_FALSE);
+
+    if (stream->stream_stats.retrans_pkt_cnt > stream->stream_stats.fec_send_rpr_cnt) {
+        stream->stream_conn->burst_loss_cnt += 1;
+    }
 
     if (stream->stream_if->stream_close_notify
         && !(stream->stream_flag & XQC_STREAM_FLAG_DISCARDED))
@@ -745,7 +817,45 @@ xqc_destroy_stream(xqc_stream_t *stream)
 
     stream->stream_flag |= XQC_STREAM_FLAG_CLOSED;
 
-#define __calc_delay(a, b) (a? (a) - (b) : 0)
+    /* handle passive bidirectional stream closure */
+    if ((stream->stream_type == XQC_CLI_BID && stream->stream_conn->conn_type == XQC_CONN_TYPE_SERVER)
+        || (stream->stream_type == XQC_SVR_BID && stream->stream_conn->conn_type == XQC_CONN_TYPE_CLIENT))
+    {
+        /* decrease passive concurrent bidirectional stream counter */
+        if (stream->stream_conn->passive_bidi_stream_cnt > 0) {
+            stream->stream_conn->passive_bidi_stream_cnt--;
+        }
+
+        /* update flow control window for bidirectional streams */
+        if (stream->stream_conn->conn_flow_ctl.fc_max_streams_bidi_recv_wind < XQC_MAX_STREAMS) {
+            stream->stream_conn->conn_flow_ctl.fc_max_streams_bidi_recv_wind++;
+        }
+        if ((stream->stream_conn->max_stream_id_bidi_remote + 1) >=
+                stream->stream_conn->conn_flow_ctl.fc_max_streams_bidi_can_recv)
+        {
+            stream->stream_conn->conn_flow_ctl.fc_max_streams_bidi_can_recv =
+                stream->stream_conn->conn_flow_ctl.fc_max_streams_bidi_recv_wind;
+            xqc_write_max_streams_to_packet(stream->stream_conn,
+                stream->stream_conn->conn_flow_ctl.fc_max_streams_bidi_can_recv, 1);
+        }
+    }
+    /* handle passive unidirectional stream closure */
+    else if ((stream->stream_type == XQC_CLI_UNI && stream->stream_conn->conn_type == XQC_CONN_TYPE_SERVER)
+        || (stream->stream_type == XQC_SVR_UNI && stream->stream_conn->conn_type == XQC_CONN_TYPE_CLIENT))
+    {
+        /* update flow control window for unidirectional streams */
+        if (stream->stream_conn->conn_flow_ctl.fc_max_streams_uni_recv_wind < XQC_MAX_STREAMS) {
+            stream->stream_conn->conn_flow_ctl.fc_max_streams_uni_recv_wind++;
+        }
+        if (((stream->stream_conn->max_stream_id_uni_remote >> 2) + 1) >=
+                stream->stream_conn->conn_flow_ctl.fc_max_streams_uni_can_recv)
+        { 
+            stream->stream_conn->conn_flow_ctl.fc_max_streams_uni_can_recv =
+                stream->stream_conn->conn_flow_ctl.fc_max_streams_uni_recv_wind;
+            xqc_write_max_streams_to_packet(stream->stream_conn,
+                stream->stream_conn->conn_flow_ctl.fc_max_streams_uni_can_recv, 0);
+        }
+    }
 
     char path_info_buff[200 * XQC_MAX_PATHS_COUNT] = {'\0'};
     xqc_stream_path_metrics_print(stream->stream_conn, stream, path_info_buff, 50 * XQC_MAX_PATHS_COUNT);
@@ -759,7 +869,7 @@ xqc_destroy_stream(xqc_stream_t *stream)
             "finrcv_delay:%ui|finread_delay:%ui|all_acked_delay:%ui|"
             "firstfinack_dely:%ui|close_delay:%ui|"
             "apprst_delay:%ui|rstsnd_delay:%ui|rstrcv_delay:%ui|%s|"
-            "path_info:%s|",
+            "path_info:%s|fec_recv_delay:%"PRIu64"|fec_send_rpr_cnt:%d|retrans:%d|",
             stream->stream_err, stream->stream_close_msg ? stream->stream_close_msg : "",
             stream->stream_conn->enable_multipath ? 1:0,
             stream->stream_state_send, stream->stream_state_recv, 
@@ -782,7 +892,11 @@ xqc_destroy_stream(xqc_stream_t *stream)
             __calc_delay(stream->stream_stats.local_reset_time, stream->stream_stats.create_time),
             __calc_delay(stream->stream_stats.peer_reset_time, stream->stream_stats.create_time),
             xqc_conn_addr_str(stream->stream_conn),
-            path_info_buff);
+            path_info_buff,
+            (stream->stream_stats.recv_time_with_fec == 0 || (stream->stream_stats.final_packet_time < stream->stream_stats.recv_time_with_fec)) ? 0 : (stream->stream_stats.final_packet_time - stream->stream_stats.recv_time_with_fec),
+            stream->stream_stats.fec_send_rpr_cnt,
+            stream->stream_stats.retrans_pkt_cnt
+        );
 #undef __calc_delay
 
     xqc_free(stream);
@@ -904,6 +1018,14 @@ xqc_passive_create_stream(xqc_connection_t *conn, xqc_stream_id_t stream_id, voi
         conn->svr_bidi_streams++;
     }
 
+    /* update passive concurrent bidirectional stream statistics */
+    if (stream_type == XQC_CLI_BID || stream_type == XQC_SVR_BID) {
+        conn->passive_bidi_stream_cnt++;
+        if (conn->passive_bidi_stream_cnt > conn->passive_bidi_stream_max) {
+            conn->passive_bidi_stream_max = conn->passive_bidi_stream_cnt;
+        }
+    }
+
     return stream;
 }
 
@@ -965,6 +1087,15 @@ xqc_read_crypto_stream(xqc_stream_t *stream)
 
         if (stream->stream_data_in.next_read_offset >= stream_frame->data_offset + stream_frame->data_length) {
             xqc_list_del(pos);
+            /* decrement buffered resource counters */
+            if (stream->stream_data_in.buffered_frame_count > 0) {
+                stream->stream_data_in.buffered_frame_count--;
+            }
+            if (stream->stream_data_in.buffered_data_bytes >= stream_frame->data_length) {
+                stream->stream_data_in.buffered_data_bytes -= stream_frame->data_length;
+            } else {
+                stream->stream_data_in.buffered_data_bytes = 0;
+            }
             xqc_destroy_stream_frame(stream_frame);
             continue;
         }
@@ -977,6 +1108,15 @@ xqc_read_crypto_stream(xqc_stream_t *stream)
         xqc_int_t ret = xqc_tls_process_crypto_data(conn->tls, stream->stream_encrypt_level, data_start, data_len);
 
         xqc_list_del(pos);
+        /* decrement buffered resource counters */
+        if (stream->stream_data_in.buffered_frame_count > 0) {
+            stream->stream_data_in.buffered_frame_count--;
+        }
+        if (stream->stream_data_in.buffered_data_bytes >= stream_frame->data_length) {
+            stream->stream_data_in.buffered_data_bytes -= stream_frame->data_length;
+        } else {
+            stream->stream_data_in.buffered_data_bytes = 0;
+        }
         xqc_destroy_stream_frame(stream_frame);
 
         if (ret != XQC_OK) {
@@ -1001,6 +1141,7 @@ xqc_crypto_stream_on_read(xqc_stream_t *stream, void *user_data)
     if (encrypt_level == XQC_ENC_LEV_INIT) {
         switch (cur_state) {
         case XQC_CONN_STATE_CLIENT_INITIAL_SENT:
+            xqc_stream_ready_to_write(stream);
             next_state = XQC_CONN_STATE_CLIENT_INITIAL_RECVD;
             break;
         case XQC_CONN_STATE_SERVER_INIT:
@@ -1154,6 +1295,11 @@ xqc_crypto_stream_on_write(xqc_stream_t *stream, void *user_data)
 
             crypto_data_list = &conn->initial_crypto_data_list;
             next_state = XQC_CONN_STATE_CLIENT_INITIAL_SENT;
+            break;
+        
+        case XQC_CONN_STATE_CLIENT_INITIAL_RECVD:
+            crypto_data_list = &conn->initial_crypto_data_list;
+            next_state = XQC_CONN_STATE_CLIENT_INITIAL_RECVD;
             break;
 
         case XQC_CONN_STATE_SERVER_INIT:
@@ -1390,7 +1536,6 @@ xqc_stream_recv(xqc_stream_t *stream, unsigned char *recv_buf, size_t recv_buf_s
     return (read == 0 && *fin == 0) ? -XQC_EAGAIN : read;
 }
 
-
 ssize_t
 xqc_stream_send(xqc_stream_t *stream, unsigned char *send_data, size_t send_data_size, uint8_t fin)
 {
@@ -1436,7 +1581,6 @@ xqc_stream_send(xqc_stream_t *stream, unsigned char *send_data, size_t send_data
             goto do_buff;
         }
     }
-
     while (offset < send_data_size || fin_only) {
 
         if (pkt_type == XQC_PTYPE_SHORT_HEADER) {
@@ -1486,6 +1630,17 @@ xqc_stream_send(xqc_stream_t *stream, unsigned char *send_data, size_t send_data
 
     xqc_stream_shutdown_write(stream);
 
+#ifdef XQC_ENABLE_FEC
+
+    // FEC encode process on stream level
+    if (conn->conn_settings.fec_level == XQC_FEC_STREAM_LEVEL
+        && stream->stream_fec_ctl.enable_fec
+        && conn->conn_settings.fec_params.fec_encoder_scheme == XQC_PACKET_MASK_CODE
+        && stream->stream_fec_ctl.stream_fec_syb_num > 0)
+    {
+        ret = xqc_process_fec_protected_packet_moq(stream);
+    }
+#endif
 do_buff:
     /* 0RTT failure requires fallback to 1RTT, save the original send data */
     if (pkt_type == XQC_PTYPE_0RTT) {
@@ -1698,7 +1853,7 @@ xqc_process_crypto_write_streams(xqc_connection_t *conn)
             ret = stream->stream_if->stream_write_notify(stream, stream->user_data);
             if (ret < 0) {
                 xqc_log(conn->log, XQC_LOG_ERROR, "|stream_write_notify crypto err:%d|", ret);
-                XQC_CONN_ERR(conn, TRA_CRYPTO_ERROR);
+                XQC_CONN_ERR(conn, TRA_INTERNAL_ERROR);
             }
         }
     }
@@ -1716,7 +1871,7 @@ xqc_process_crypto_read_streams(xqc_connection_t *conn)
             ret = stream->stream_if->stream_read_notify(stream, stream->user_data);
             if (ret < 0) {
                 xqc_log(conn->log, XQC_LOG_ERROR, "|stream_read_notify crypto err:%d|", ret);
-                XQC_CONN_ERR(conn, TRA_CRYPTO_ERROR);
+                XQC_CONN_ERR(conn, TRA_INTERNAL_ERROR);
             }
         }
     }
