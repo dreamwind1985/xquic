@@ -462,8 +462,8 @@ if (XQC_ENABLE_TESTING)
     endif()
 
     ### test client/server ###
-    add_executable(test_server tests/test_server.c  tests/platform.c  ${GETOPT_SOURCES})
-    add_executable(test_client tests/test_client.c  tests/platform.c ${GETOPT_SOURCES})
+    add_executable(test_server tests/test_server.c  ${GETOPT_SOURCES})
+    add_executable(test_client tests/test_client.c ${GETOPT_SOURCES})
     add_executable(xquic_bench tests/xquic_bench.c ${GETOPT_SOURCES})
     add_executable(test_h3_client tests/test_h3_client.c tests/client_common.c ${GETOPT_SOURCES})
     target_compile_definitions(test_h3_client PRIVATE -D_TEST_H3_CLIENT_)
@@ -477,7 +477,6 @@ if (XQC_ENABLE_TESTING)
         "demo/xqc_hq_ctx.c"
         "demo/xqc_hq_conn.c"
         "demo/xqc_hq_request.c"
-        "tests/platform.c"
     )
 
     set(
